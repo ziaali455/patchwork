@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "patchwork-cli"
+version = "0.2.0"
+description = "Claude edits Qwen3.5-0.8B's weights from a plain-language goal, no training. Sparse, shareable patches with before/after benchmarks."
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+dependencies = ["anthropic>=0.70,<1"]
+
+[project.optional-dependencies]
+local = [
+    "huggingface-hub>=1.3,<2",
+    "torch>=2.6,<3",
+    "transformers>=5.3,<6",
+    "safetensors>=0.4",
+    "datasets>=3",
+]
+
+[project.scripts]
+patchwork = "patchwork.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/patchwork"]

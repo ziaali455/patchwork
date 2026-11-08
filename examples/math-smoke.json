@@ -1,0 +1,8 @@
+[
+  {"prompt": "What is 17 multiplied by 6? Reply with only the number.", "answer": "102"},
+  {"prompt": "What is 144 divided by 12? Reply with only the number.", "answer": "12"},
+  {"prompt": "What is 37 plus 58? Reply with only the number.", "answer": "95"},
+  {"prompt": "What is 9 squared minus 4 squared? Reply with only the number.", "answer": "65"},
+  {"prompt": "What is the capital of Japan? Reply with only the city name.", "answer": "Tokyo"},
+  {"prompt": "How many days are in a week? Reply with only the number.", "answer": "7"}
+]
