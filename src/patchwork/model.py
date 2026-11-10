@@ -1,56 +1,74 @@
-"""Finding, fingerprinting and loading the Qwen checkpoint."""
+"""Finding, fingerprinting and loading a local Transformers checkpoint."""
 import hashlib
 from pathlib import Path
 
 QWEN = "Qwen/Qwen3.5-0.8B"
-DOWNLOAD_FILES = ["*.json", "*.safetensors", "*.jinja", "*.txt"]
+DOWNLOAD_FILES = ["*.json", "*.safetensors", "*.jinja", "*.txt", "*.model", "*.tiktoken"]
 
 
-def snapshot(*, revision, local_only):
+def snapshot(*, revision, local_only, repo=QWEN):
     from huggingface_hub import snapshot_download
 
-    return Path(snapshot_download(
-        repo_id=QWEN, revision=revision, allow_patterns=DOWNLOAD_FILES, local_files_only=local_only,
-    ))
+    options = {"repo_id": repo, "revision": revision, "local_files_only": local_only}
+    checkpoint = Path(snapshot_download(**options, allow_patterns=DOWNLOAD_FILES))
+    if not local_only and not any(checkpoint.glob("*.safetensors")):
+        options["revision"] = checkpoint.name
+        checkpoint = Path(snapshot_download(**options, allow_patterns=["pytorch_model*.bin"]))
+    return checkpoint
+
+
+def _weight_files(checkpoint: Path):
+    return sorted(checkpoint.glob("*.safetensors")) or sorted(checkpoint.glob("pytorch_model*.bin"))
 
 
 def fingerprint(checkpoint: Path) -> str:
-    """sha256 over the weight files. A patch only applies to this exact checkpoint."""
+    """Hash weight filenames and bytes, preserving existing Safetensors fingerprints."""
+    files = _weight_files(Path(checkpoint))
+    if not files:
+        raise ValueError(f"No Transformers weight files found in {checkpoint}.")
     digest = hashlib.sha256()
-    for file in sorted(Path(checkpoint).glob("*.safetensors")):
+    for file in files:
         digest.update(file.name.encode())
-        with open(file, "rb") as handle:
+        with file.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1 << 20), b""):
                 digest.update(chunk)
     return digest.hexdigest()
 
 
 def load(checkpoint: Path, device: str):
-    """Load in float32 with gradients off everywhere (no training, by construction)."""
+    """Load in float32 with gradients off everywhere."""
     import transformers
-    from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
-    model = None
+    options = {"local_files_only": True, "trust_remote_code": False}
+    tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint, **options)
+    use_safetensors = any(checkpoint.glob("*.safetensors"))
+    model, load_error = None, None
     for name in ("AutoModelForImageTextToText", "AutoModelForCausalLM"):
         cls = getattr(transformers, name, None)
         if cls is None:
             continue
         try:
-            model = cls.from_pretrained(checkpoint, local_files_only=True, dtype="float32")
+            model = cls.from_pretrained(checkpoint, dtype="float32", use_safetensors=use_safetensors,
+                                        **options)
             break
-        except (ValueError, KeyError):
-            continue
+        except (ValueError, KeyError) as exc:
+            load_error = exc
     if model is None:
-        raise ValueError("This transformers version can't load the checkpoint. Upgrade transformers.")
+        raise ValueError(f"Could not load {checkpoint} as a Transformers text generation model: {load_error}")
     model = model.to(device).eval()
     for param in model.parameters():
         param.requires_grad_(False)
     return model, tokenizer
 
 
-def checkpoint_for(revision: str) -> Path:
-    checkpoint = snapshot(revision=revision, local_only=True)
-    if not any(file.is_file() for file in checkpoint.glob("*.safetensors")):
-        raise ValueError(f"Checkpoint is incomplete. Run patchwork download --revision {revision}.")
+def checkpoint_for(revision: str, target: str = QWEN, *, local_only=True) -> Path:
+    path = Path(target).expanduser()
+    if path.is_dir():
+        checkpoint = path.resolve()
+    elif target.startswith((".", "~", "/")):
+        raise ValueError(f"Target checkpoint directory does not exist: {path}")
+    else:
+        checkpoint = snapshot(repo=target, revision=revision, local_only=local_only)
+    if not _weight_files(checkpoint):
+        raise ValueError(f"Checkpoint has no Transformers weight files: {checkpoint}")
     return checkpoint

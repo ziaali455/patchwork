@@ -1,7 +1,7 @@
-"""Offline end-to-end test: a tiny random Qwen-style model and a scripted fake Claude.
+"""Offline end-to-end tests with tiny random models and scripted editors.
 
-Covers scoring, greedy generation, every Claude tool (including error paths),
-exact revert, and the sparse patch format (write, apply, remove, wrong base).
+Covers scoring, greedy generation, every editor tool, both HTTP protocols,
+exact revert, and patch replay and export for multiple target architectures.
 No downloads, no API key.  Run:  uv run --extra local python tests/test_offline.py
 """
 import json
@@ -9,15 +9,18 @@ import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import httpx
 import torch
 from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast, Qwen2Config, Qwen2ForCausalLM
+from transformers import GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerFast, Qwen2Config, Qwen2ForCausalLM
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from patchwork import claude, patchfile  # noqa: E402
+from patchwork import claude, patchfile, providers  # noqa: E402
 from patchwork.benchmark import Generator, evaluate, is_correct  # noqa: E402
 from patchwork.cli import main  # noqa: E402
+from patchwork.model import load  # noqa: E402
 from patchwork.probe import Probe  # noqa: E402
 from patchwork.weights import Weights  # noqa: E402
 
@@ -71,6 +74,93 @@ class FakeClaude:
                                 model_dump=lambda: {"name": name, "input": args})
         return SimpleNamespace(content=[block], stop_reason="tool_use",
                                usage=SimpleNamespace(input_tokens=100, output_tokens=10))
+
+
+def test_editor_cli():
+    import os
+
+    _, tokenizer = tiny_model()
+    target = GPT2LMHeadModel(GPT2Config(
+        vocab_size=len(tokenizer), n_embd=32, n_inner=64, n_head=4, n_layer=1,
+        bos_token_id=None, eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id,
+    ))
+    tensor_name = "transformer.h.0.mlp.c_proj.weight"
+    edit = {"tensor": tensor_name, "columns": [1], "operation": "scale",
+            "strength": 0.5, "rationale": "verify the transposed layout"}
+    finish = {"summary": "edited one column", "helped": True}
+    client = httpx.Client
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        checkpoint = tmp / "gpt2"
+        target.save_pretrained(checkpoint)
+        tokenizer.save_pretrained(checkpoint)
+        practice, evaluation = tmp / "practice.json", tmp / "eval.json"
+        practice.write_text('[{"prompt":"practice case","answer":"7"}]')
+        evaluation.write_text('[{"prompt":"held out case","answer":"9"}]')
+        for provider, endpoint, flags in (
+            ("openai", "https://api.openai.com/v1/responses", []),
+            ("openai-compatible", "https://editor.example/v1/chat/completions",
+             ["--editor-base-url", "https://editor.example/v1", "--editor-key-env", "EDITOR_TEST_KEY"]),
+        ):
+            requests = []
+            reasoning = {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "encrypted"}
+
+            def respond(request):
+                payload = json.loads(request.content)
+                assert str(request.url) == endpoint
+                assert request.headers["authorization"] == "Bearer test-key"
+                assert payload["model"] == "test-model"
+                assert "held out case" not in request.content.decode()
+                requests.append(payload)
+                first = len(requests) == 1
+                calls = [("bad", "apply_edit", "not json"), ("edit", "apply_edit", json.dumps(edit))] if first else [
+                    ("done", "finish", json.dumps(finish))]
+                if provider == "openai":
+                    assert payload["store"] is False and payload["include"] == ["reasoning.encrypted_content"]
+                    assert payload["tools"][0]["type"] == "function"
+                    if not first:
+                        assert reasoning in payload["input"]
+                        error, result = payload["input"][-2:]
+                        assert error["call_id"] == "bad" and "error" in json.loads(error["output"])
+                        assert result["call_id"] == "edit" and json.loads(result["output"])["parameters_changed"] == 32
+                    items = [{"type": "function_call", "call_id": id_, "name": name, "arguments": args}
+                             for id_, name, args in calls]
+                    return httpx.Response(200, json={"output": [reasoning, *items],
+                                                     "usage": {"input_tokens": 11, "output_tokens": 4}})
+                assert payload["tools"][0]["function"]["name"] == "inspect_columns"
+                if not first:
+                    error, result = payload["messages"][-2:]
+                    assert error["tool_call_id"] == "bad" and "error" in json.loads(error["content"])
+                    assert result["tool_call_id"] == "edit" and json.loads(result["content"])["parameters_changed"] == 32
+                message = {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": id_, "type": "function", "function": {"name": name, "arguments": args}}
+                    for id_, name, args in calls
+                ]}
+                return httpx.Response(200, json={"choices": [{"message": message}],
+                                                 "usage": {"prompt_tokens": 11, "completion_tokens": 4}})
+
+            out = tmp / provider
+            with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key", "EDITOR_TEST_KEY": "test-key"}), patch.object(
+                providers.httpx, "Client", side_effect=lambda **kwargs: client(transport=httpx.MockTransport(respond), **kwargs),
+            ):
+                assert main(["patch", "--target-model", str(checkpoint), "--editor-provider", provider,
+                             "--editor-model", "test-model", "--output", str(out), "--prompt", "test edits",
+                             "--max-new-tokens", "2", "--eval", str(evaluation), "--practice", str(practice), *flags]) == 0
+            assert len(requests) == 2
+            report = json.loads((out / "report.json").read_text())
+            assert report["editor_provider"] == provider and report["editor_summary"] == finish
+            assert report["usage"] == {"input_tokens": 22, "output_tokens": 8, "turns": 2}
+            assert report["parameters_changed"] == 32
+
+        assert main(["eval", "--patch", str(out), "--eval", str(evaluation), "--max-new-tokens", "2"]) == 0
+        exported = tmp / "exported"
+        assert main(["export", "--patch", str(out), "--output", str(exported)]) == 0
+        model, _ = load(exported, "cpu")
+        expected = dict(target.named_parameters())[tensor_name].detach().clone()
+        expected[1] *= 0.5
+        assert torch.equal(dict(model.named_parameters())[tensor_name], expected)
+    print("editor CLI ok: two API formats, GPT-2 patch, manifest-driven eval and export")
 
 
 def main_test():
@@ -135,6 +225,7 @@ def main_test():
     os.environ.pop("ANTHROPIC_API_KEY", None)
     assert main(["login"]) == 1
     print("cli ok")
+    test_editor_cli()
     print("\nALL OFFLINE TESTS PASSED")
 
 

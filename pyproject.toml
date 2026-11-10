@@ -5,10 +5,10 @@ build-backend = "hatchling.build"
 [project]
 name = "patchwork-cli"
 version = "0.2.0"
-description = "Claude edits Qwen3.5-0.8B's weights from a plain-language goal, no training. Sparse, shareable patches with before/after benchmarks."
+description = "Model editors update local model weights from a plain-language goal, no training. Sparse, shareable patches with before/after benchmarks."
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
-dependencies = ["anthropic>=0.70,<1"]
+dependencies = ["anthropic>=0.70,<1", "httpx>=0.27,<1"]
 
 [project.optional-dependencies]
 local = [

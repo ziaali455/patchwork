@@ -1,24 +1,24 @@
 # Patchwork
 
-Patchwork is an experimental CLI where Claude edits the weights of Qwen3.5-0.8B directly from a plain-language goal, with no training and no gradients. Claude investigates the model, makes small targeted edits, tests them, and keeps only what helps. The result is a tiny, shareable **patch** plus a before-and-after benchmark.
+Patchwork is an experimental CLI that lets an editor model change the weights of a smaller local model from a plain-language goal, without training or gradients. The editor investigates the target, tries small weight edits, and uses practice results to decide what to keep. Patchwork saves the remaining changes as a sparse **patch** and reports the before-and-after benchmark. The defaults are Claude Sonnet and Qwen3.5-0.8B.
 
 It follows [Sparks of Weight-Space Programming](https://rikiyat.github.io/blog/weight-space-programming/) (MIT CSAIL, Nov 2026), where an LLM fixed Qwen3.5-0.8B's reasoning loops by editing 0.016% of its weights.
 
 ## How it works
 
-Claude never runs code on your machine. It can only call these tools:
+The editor can call the following local tools. Patchwork validates and executes each call.
 
 | Tool | What it does | Cost |
 |---|---|---|
 | `inspect_columns`, `align_columns` | Read MLP down-projection weights; find columns aligned with a direction | free |
-| `run_practice` | Qwen answers practice problems; Claude sees accuracy, which answers loop, and how they end | 1 forward pass |
+| `run_practice` | The target answers practice problems and the editor sees accuracy, token-limit hits, and output endings | 1 forward pass |
 | `find_direction` | Mean activation difference between two groups of texts (e.g. looping vs finished) at a layer | 1 forward pass |
 | `apply_edit` | `scale` columns, or `project_out` a direction (measured, or an existing column) | applied immediately |
 | `revert_edit` | Undo the last edit or all edits, exactly | free |
 
 Forward passes are the scarce resource. In the paper, 10–25 barely helped and 50 is where the fix landed, so the default budget is 50. Every edit is validated (finite values, no overlaps, a parameter budget of 0.1% of weights by default).
 
-Practice uses the GSM8K **train** split (or your `--practice` file), and evaluation uses the **test** split (or your `--eval` file), so Claude never sees the benchmark. Practice prompts and Qwen's practice outputs are sent to Claude; evaluation data stays local.
+Practice uses the GSM8K **train** split (or your `--practice` file). Evaluation uses the **test** split (or your `--eval` file). The editor receives the goal, tensor catalog, and tool results, including practice output excerpts. Evaluation data stays local.
 
 ## Install
 
@@ -68,14 +68,41 @@ The default device is CPU. Pass `--device mps` on Apple Silicon or `--device cud
    patchwork export --patch runs/loops --output qwen-fixed  # full checkpoint for other tools
    ```
 
+## Choose a different editor and target
+
+Use `--target-model` with a Hugging Face repository ID or a local Transformers checkpoint directory. The download command fills the local cache for Hugging Face targets. Use the same ID when creating the patch.
+
+```sh
+patchwork download --target-model HuggingFaceTB/SmolLM2-135M-Instruct
+
+# Set OPENAI_API_KEY in your shell before using the OpenAI editor.
+patchwork patch \
+  --target-model HuggingFaceTB/SmolLM2-135M-Instruct \
+  --editor-provider openai --editor-model gpt-6-astra \
+  --prompt "Improve accuracy on short arithmetic problems." \
+  --eval gsm8k:5 --passes 3 --output runs/smollm
+
+patchwork eval --patch runs/smollm --eval gsm8k:5
+```
+
+| `--editor-provider` | Model and credentials |
+|---|---|
+| `anthropic` (default) | Uses the Anthropic Messages API and `ANTHROPIC_API_KEY`. Accepts an Anthropic model ID or the existing shortcuts with `--editor-model` or `--claude-model`. |
+| `openai` | Uses the OpenAI Responses API and `OPENAI_API_KEY`. Pass a model ID that supports function calling with `--editor-model`. |
+| `openai-compatible` | Uses a Chat Completions API with function calling. Pass `--editor-model` and `--editor-base-url` (for example, `http://localhost:8000/v1`). For authenticated endpoints, set a key in your shell and pass its variable name with `--editor-key-env`. |
+
+The target must be a text-generation checkpoint that Transformers can load with built-in model code and editable floating-point weights. Patchwork detects common feed-forward output projections, including `down_proj`, GPT-2's `c_proj`, GPT-NeoX's `dense_4h_to_h`, and OPT's `fc2`. For a different layout, pass `--edit-pattern` with a full tensor-name regex containing a zero-based `(?P<layer>...)` group. For example, `'model\.layers\.(?P<layer>\d+)\.ffn\.output\.weight'`. GGUF, quantized-only checkpoints, and models that require remote Python code are outside the supported scope.
+
+Evaluation and export infer the base target and revision from the patch. For a local checkpoint moved to another directory, use `--target-model /path/to/checkpoint` to override the recorded path. The fingerprint still has to match.
+
 ## What a run produces
 
 ```
 runs/loops/
   patch.safetensors   only the changed weights (flat indices + float32 deltas)
   manifest.json       goal, base revision + sha256 fingerprint, edits, stats
-  report.json         settings, Claude's summary, token usage, per-case before/after
-  transcript.jsonl    every Claude message and tool call, for auditing
+  report.json         settings, editor summary, token usage, per-case before/after
+  transcript.jsonl    editor messages and tool calls, for auditing
 ```
 
 A patch applies only to the exact checkpoint it was made from (checked by fingerprint), and `apply` with the deltas negated removes it. Patches are KB to a few MB instead of a 3 GB checkpoint, which makes them easy to share.
@@ -93,6 +120,6 @@ Bring your own data: `--practice` and `--eval` take JSON arrays of `{"prompt": .
 ## Development
 
 ```sh
-uv run --extra local python tests/test_offline.py   # tiny random model + scripted fake Claude, no downloads
+uv run --extra local python tests/test_offline.py   # tiny random models + fake editors, no model downloads
 ```
 # patchwork

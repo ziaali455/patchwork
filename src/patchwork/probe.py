@@ -1,10 +1,10 @@
-"""Forward passes: the only way Claude sees how Qwen actually behaves.
+"""Forward passes: let the editor observe how the target model behaves.
 
 Each call costs one pass from a fixed budget. In the MIT experiment, 10 to 25
 passes barely helped and 50 is where the fix landed, so the budget matters.
 
-  run_practice    Qwen answers practice problems (never the eval set)
-  find_direction  Qwen reads two groups of texts; we store the difference of
+  run_practice    The target model answers practice problems (never the eval set)
+  find_direction  The target model reads two groups of texts; we store the difference of
                   their average activations at one layer as a named direction
 """
 import random

@@ -1,6 +1,6 @@
 """The only things Claude can do to the weights.
 
-Claude never runs code. It calls these validated operations on the MLP
+The editor calls these validated operations on the MLP
 down-projection matrices (the matrices that write each layer's MLP output
 back into the model's main "residual" stream):
 
@@ -15,20 +15,46 @@ import re
 
 import torch
 
-DOWN_PROJECTION = re.compile(r"(?:.*\.)?layers\.(\d+)\.mlp\.down_proj\.weight")
+DOWN_PROJECTION = (
+    r"(?:.*\.)?(?:layers|h|blocks|block)\.(?P<layer>\d+)\."
+    r"(?:mlp\.(?:down_proj|c_proj|dense_4h_to_h|fc2|fc_out|proj_out)|fc2)\.weight"
+)
+NON_TEXT_PREFIXES = {"vision", "visual", "vision_model", "vision_tower", "vision_encoder",
+                     "audio", "audio_model", "audio_encoder"}
 MAX_COLUMNS_PER_EDIT = 256
 
 
 class Weights:
-    def __init__(self, model, budget_fraction=0.001):
+    def __init__(self, model, budget_fraction=0.001, edit_pattern=None):
+        from transformers.pytorch_utils import Conv1D
+
         self.tensors, self.layer_of = {}, {}
+        self.transposed = set()
+        pattern = re.compile(edit_pattern or DOWN_PROJECTION)
+        if "layer" not in pattern.groupindex:
+            raise ValueError("--edit-pattern requires a named group (?P<layer>...) for the layer index.")
+        config = model.config.get_text_config()
+        hidden_size = config.hidden_size
         for name, param in model.named_parameters():
-            match = DOWN_PROJECTION.fullmatch(name)
-            if match and param.ndim == 2 and param.is_floating_point():
-                self.tensors[name] = param
-                self.layer_of[name] = int(match.group(1))
+            match = pattern.fullmatch(name)
+            if not match or param.ndim != 2 or not param.is_floating_point():
+                continue
+            if edit_pattern is None and NON_TEXT_PREFIXES.intersection(name.split(".")):
+                continue
+            module = model.get_submodule(name.rsplit(".", 1)[0])
+            transpose = isinstance(module, Conv1D) or (param.shape[0] != hidden_size and param.shape[1] == hidden_size)
+            matrix = param.T if transpose else param
+            if matrix.shape[0] != hidden_size:
+                continue
+            layer = int(match.group("layer"))
+            if not 0 <= layer < config.num_hidden_layers:
+                raise ValueError(f"Invalid layer index {layer} for editable tensor {name}.")
+            self.tensors[name], self.layer_of[name] = matrix, layer
+            if transpose:
+                self.transposed.add(name)
         if not self.tensors:
-            raise ValueError("No editable MLP down-projection matrices found.")
+            raise ValueError("No editable text MLP down-projection matrices found. "
+                             "Use --edit-pattern for a different Transformers layout.")
         self.catalog = {name: list(param.shape) for name, param in self.tensors.items()}
         self.budget = int(sum(p.numel() for p in model.parameters()) * budget_fraction)
         self.directions: dict[str, torch.Tensor] = {}

@@ -3,8 +3,8 @@
 Cases come from a JSON file ([{"prompt", "answer"}, ...]) or a built-in spec:
   gsm8k        30 held-out GSM8K test problems
   gsm8k:100    100 of them
-Practice cases (what Claude gets to try during editing) default to the GSM8K
-*train* split, so Claude never sees the evaluation set.
+Practice cases (what the editor gets to try during editing) default to the GSM8K
+*train* split, so the editor never sees the evaluation set.
 """
 import json
 import re
@@ -113,7 +113,7 @@ class Generator:
         raw = self.tokenizer.decode(tokens, skip_special_tokens=False)
         if self.think_end is not None and self.think_end in tokens:
             answer_tokens = tokens[tokens.index(self.think_end) + 1:]
-        elif self.thinking:
+        elif self.thinking and self.think_end is not None:
             answer_tokens = []  # never finished thinking: no answer
         else:
             answer_tokens = tokens

@@ -24,8 +24,12 @@ def build(weights):
         cols = torch.tensor(entry["columns"], device=matrix.device)
         delta = (matrix[:, cols].float() - entry["original"].float()).cpu()
         rows, which = delta.nonzero(as_tuple=True)
-        flat = rows * matrix.shape[1] + torch.tensor(entry["columns"])[which]
+        columns = torch.tensor(entry["columns"])[which]
         key = entry["tensor"]
+        if key in weights.transposed:
+            flat = columns * matrix.shape[0] + rows
+        else:
+            flat = rows * matrix.shape[1] + columns
         idx = torch.cat([tensors.get(f"{key}::idx", torch.empty(0, dtype=torch.long)), flat])
         val = torch.cat([tensors.get(f"{key}::delta", torch.empty(0)), delta[rows, which]])
         tensors[f"{key}::idx"], tensors[f"{key}::delta"] = idx.contiguous(), val.contiguous()
