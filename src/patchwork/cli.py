@@ -176,16 +176,20 @@ def export(args):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if argv and argv[0] == "breakout":
+    if argv and argv[0] in ("breakout", "car"):
         try:
-            from .breakout import main as breakout_main
-            breakout_main(argv[1:])
+            if argv[0] == "car":
+                from .car import main as workflow_main
+            else:
+                from .breakout import main as workflow_main
+            workflow_main(argv[1:])
             return 0
         except Exception as exc:
             print(f"patchwork: {exc}", file=sys.stderr)
             return 1
     parser = argparse.ArgumentParser(prog="patchwork", description="Use an editor model to change local model weights directly, without training.")
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("car", help="Repair and evaluate Kinetix car policies; use car --help.")
     commands.add_parser("breakout", help="Author, import and evaluate small Breakout networks; use breakout --help.")
     commands.add_parser("login", help="Verify your ANTHROPIC_API_KEY.")
     commands.add_parser("models", help="List Claude model IDs available to your key.")

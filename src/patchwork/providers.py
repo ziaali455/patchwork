@@ -41,6 +41,33 @@ class OpenAIEditor:
             refused=any(part["type"] == "refusal" for part in content),
         )
 
+    def text_turn(self, model, messages, *, max_output_tokens=16384, reasoning_effort="high"):
+        """Stream a tool-free response so long weight prompts make progress."""
+        payload = dict(model=model, input=messages, tools=[], store=False, stream=True,
+                       instructions="Follow the supplied policy specification. Return numerical edits. Use no tools.",
+                       reasoning={"effort": reasoning_effort}, max_output_tokens=max_output_tokens)
+        data = None
+        with self.client.stream("POST", "responses", json=payload) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line.startswith("data: ") or line == "data: [DONE]":
+                    continue
+                event = json.loads(line[6:])
+                kind = event.get("type")
+                if kind == "response.completed":
+                    data = event["response"]
+                elif kind in ("error", "response.failed", "response.incomplete"):
+                    raise ValueError(f"Editor stream ended with {kind}.")
+        if data is None:
+            raise ValueError("Editor stream ended without a complete response.")
+        output = data["output"]
+        content = [part for item in output if item["type"] == "message" for part in item["content"]]
+        usage = data.get("usage") or {}
+        return editor.Turn(history=output, log=output, calls=[],
+                           text=[part["text"] for part in content if part["type"] == "output_text"],
+                           input_tokens=usage.get("input_tokens", 0), output_tokens=usage.get("output_tokens", 0),
+                           refused=any(part["type"] == "refusal" for part in content))
+
     def tool_results(self, results):
         return [{"type": "function_call_output", "call_id": call_id, "output": _output(content, error)}
                 for call_id, content, error in results]
@@ -92,11 +119,11 @@ def _post(client, endpoint, payload):
 
 
 @contextmanager
-def connect(provider, model, *, base_url=None, key_env=None):
+def connect(provider, model, *, base_url=None, key_env=None, timeout=300):
     if provider != "openai-compatible" and base_url is not None:
         raise ValueError("--editor-base-url requires --editor-provider openai-compatible.")
     if provider == "anthropic":
-        with claude.client(key_env or "ANTHROPIC_API_KEY") as api:
+        with claude.client(key_env or "ANTHROPIC_API_KEY", timeout=timeout) as api:
             api.models.retrieve(model)
             yield claude.AnthropicEditor(api)
         return
@@ -117,5 +144,5 @@ def connect(provider, model, *, base_url=None, key_env=None):
     if key_env and not key:
         raise ValueError(f"Set {key_env} to use this editor endpoint.")
     headers = {"Authorization": f"Bearer {key}"} if key else {}
-    with httpx.Client(base_url=base_url.rstrip("/") + "/", headers=headers, timeout=300) as client:
+    with httpx.Client(base_url=base_url.rstrip("/") + "/", headers=headers, timeout=timeout) as client:
         yield adapter(client)

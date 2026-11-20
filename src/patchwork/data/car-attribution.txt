@@ -1,0 +1,10 @@
+The bundled car prompt and rounded actor weights are from:
+Rikiya Takehi, Jayden Teoh, Alex Zhang and Omar Khattab.
+Sparks of Weight-Space Programming (November 2026), Experiment 4.
+https://github.com/RikiyaT/lm_understand-logs/tree/main/exp4_fix_car
+Source file: runs/oneshot_repair/reply/prompt.txt
+Git blob: 1b573d0d37843e534d8476fe8dc9eb29d337256a
+Licensed under Creative Commons Attribution 4.0 International.
+https://creativecommons.org/licenses/by/4.0/
+This package reproduces the public prompt, including the rounded trained actor,
+without the published repair response. Edits and the Kinetix simulator run locally.

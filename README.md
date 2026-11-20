@@ -198,3 +198,48 @@ Both modes save the prompt, responses, candidate `.npz` files, `selected.npz`, a
 Provider integration tests use simulated responses: `uv run --extra local --extra breakout python tests/test_breakout_editors.py`.
 
 `--dtype` accepts `float32` (default), `float16`, or `bfloat16`. Patches record the selected dtype, and `eval --patch` and `export --patch` infer it. Use a dtype supported by your device. Float16 reduces weight memory use on an M1 Mac.
+
+## Repair the Kinetix car policy
+
+The integrated car workflow uses the tested Kinetix commit and the public rounded actor from Experiment 4. Install its optional dependencies in a Python 3.12 environment:
+
+```sh
+uv venv --python 3.12
+uv pip install -e '.[car]'
+```
+
+Request a repair and one feedback-driven revision:
+
+```sh
+uv run --python 3.12 --extra car patchwork car run \
+  --editor-mode api --editor-provider openai --editor-model gpt-6-astra \
+  --rounds 2 --practice-episodes 64 --eval-episodes 1024 \
+  --output runs/car-repair
+```
+
+OpenAI uses streamed Responses requests with high reasoning effort by default, configurable with `--reasoning-effort`. All providers use a 20-minute request timeout for this large prompt. `--editor-max-tokens` defaults to 16,384. Other supported editor providers use the same credential and endpoint flags as Breakout. Export your API key into the process environment before running.
+
+The first attempt receives the original task and trained weights. Each additional round receives practice scores and a recorded trajectory from its preceding candidate. Every response supplies a complete set of edits against the original rounded actor. The highest practice success rate determines the selected actor, with ties retaining the earlier candidate. Fresh evaluation seeds are used only after selection. Defaults are practice seeds starting at 30,000 and evaluation seeds starting at 40,000.
+
+Import responses obtained from a chat:
+
+```sh
+patchwork car prompt > car-prompt.txt
+patchwork car run --editor-mode manual --reply first.md --reply revision.md \
+  --practice-episodes 64 --eval-episodes 1024 --output runs/car-manual
+```
+
+Manual mode makes no API requests. Each reply in `car run` describes edits relative to the original trained actor. For incremental edits to a saved checkpoint, use `car apply --base`:
+
+```sh
+patchwork car apply revision.md revised.npz --base previous.npz
+patchwork car evaluate --weights revised.npz --episodes 1024 --seed 50000 --output car-eval.json
+```
+
+Use `car run --base previous.npz` to start from an existing repair. In API mode, Patchwork describes its changed weights, measures its practice behavior, and supplies a recorded trajectory before requesting a revision. The supplied checkpoint remains a candidate during selection.
+
+A run saves `base.npz`, `initial.npz`, each candidate response and actor, feedback files, `selected.npz`, and `report.json`. Reports record simulator versions, checkpoint hashes, token usage, seed ranges, practice selection and held-out success. Evaluation progress is saved after every batch, and interrupted runs are marked failed. Choose a new output directory for a retry. The actor starts with trained weights; unused edit entries retain their original values. Numerical responses are parsed as data and invalid edits reject the import.
+
+The bundled prompt and actor are licensed CC BY 4.0, with attribution in `patchwork/data/car-attribution.txt`. The simulator is installed from its pinned upstream Git repository. CPU simulation uses float32 and sampled actions with a 256-step episode limit. Local RNG choices differ from the paper.
+
+Car regression checks can be run with `python tests/test_car.py`. They cover manual and API orchestration with simulated providers. The simulator is verified separately against the released policies.

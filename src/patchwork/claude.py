@@ -6,11 +6,11 @@ from anthropic import Anthropic
 from . import editor
 
 
-def client(key_env="ANTHROPIC_API_KEY"):
+def client(key_env="ANTHROPIC_API_KEY", *, timeout=300):
     key = os.environ.get(key_env)
     if not key:
         raise ValueError(f"Set {key_env} with a key from the Claude Console.")
-    return Anthropic(api_key=key, timeout=300, max_retries=2)
+    return Anthropic(api_key=key, timeout=timeout, max_retries=2)
 
 
 class AnthropicEditor:
