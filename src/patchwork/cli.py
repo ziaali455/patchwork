@@ -29,8 +29,10 @@ def _load(args):
 
     checkpoint = checkpoint_for(args.revision, args.target_model)
     print(f"Loading {args.target_model} ({checkpoint.name[:10]}) on {args.device}…", flush=True)
-    model, tokenizer = load(checkpoint, args.device)
-    generator = Generator(model, tokenizer, max_new_tokens=args.max_new_tokens, thinking=args.thinking)
+    model, tokenizer = load(checkpoint, args.device, args.dtype)
+    generator = Generator(model, tokenizer, max_new_tokens=args.max_new_tokens, thinking=args.thinking,
+                          temperature=args.temperature, top_p=args.top_p, top_k=args.top_k,
+                          presence_penalty=args.presence_penalty, seed=args.seed)
     return checkpoint, fingerprint(checkpoint), model, tokenizer, generator
 
 
@@ -48,7 +50,9 @@ def _target(args):
 
 def _settings(args):
     return {"eval": str(args.eval), "max_new_tokens": args.max_new_tokens, "thinking": args.thinking,
-            "device": args.device, "decoding": "greedy", "dtype": "float32",
+            "device": args.device, "decoding": "sampled" if args.temperature > 0 else "greedy",
+            "temperature": args.temperature, "top_p": args.top_p, "top_k": args.top_k,
+            "presence_penalty": args.presence_penalty, "seed": args.seed, "dtype": args.dtype,
             "torch": version("torch"), "transformers": version("transformers")}
 
 
@@ -96,6 +100,7 @@ def patch(args):
 
         args.output.mkdir(parents=True)
         probe = Probe(model, tokenizer, generator, weights, practice, budget=args.passes)
+        probe.run_practice({"n_random": 8})
         print(f"\nEditing session with {editor_model} ({args.passes} forward passes)…", flush=True)
         finished, usage = editor.session(
             connection, editor_model, args.prompt,
@@ -112,7 +117,7 @@ def patch(args):
     report = {"base_model": base.get("repo") or base["path"], "base_revision": base.get("revision"),
               **editor_info, "goal": args.prompt, "editor_summary": finished, "usage": usage,
               "forward_passes": probe.used, "edits": weights.summary(), "evaluation": _settings(args),
-              "before": before}
+              "before": before, "practice_validation": probe.validation()}
     if provider == "anthropic":
         report["claude_summary"] = finished
     if not weights.history:
@@ -121,10 +126,11 @@ def patch(args):
         print("No edits were kept, so there is no patch. Details in report.json.")
         return
 
+    print(f"Practice validation: {probe.validation()['status']}")
     tensors, changed = build(weights)
     total = sum(p.numel() for p in model.parameters())
     write(args.output, tensors, {
-        "goal": args.prompt, "base": base, **editor_info, "edits": weights.summary(),
+        "goal": args.prompt, "base": base, "dtype": args.dtype, **editor_info, "edits": weights.summary(),
         "parameters_changed": changed, "fraction_changed": changed / total,
     })
     print(f"Benchmarking the patched model ({changed:,} weights, {changed / total:.4%})…", flush=True)
@@ -157,7 +163,7 @@ def export(args):
     if args.output.exists():
         raise ValueError(f"Output already exists: {args.output}")
     checkpoint = checkpoint_for(args.revision, args.target_model)
-    model, tokenizer = load(checkpoint, "cpu")
+    model, tokenizer = load(checkpoint, "cpu", args.dtype)
     apply(model, args.patch, fingerprint(checkpoint))
     model.save_pretrained(args.output)
     tokenizer.save_pretrained(args.output)
@@ -169,12 +175,23 @@ def export(args):
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "breakout":
+        try:
+            from .breakout import main as breakout_main
+            breakout_main(argv[1:])
+            return 0
+        except Exception as exc:
+            print(f"patchwork: {exc}", file=sys.stderr)
+            return 1
     parser = argparse.ArgumentParser(prog="patchwork", description="Use an editor model to change local model weights directly, without training.")
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("breakout", help="Author, import and evaluate small Breakout networks; use breakout --help.")
     commands.add_parser("login", help="Verify your ANTHROPIC_API_KEY.")
     commands.add_parser("models", help="List Claude model IDs available to your key.")
 
     def checkpoint_options(p):
+        p.add_argument("--dtype", choices=("float32", "float16", "bfloat16"), help="Target weight dtype (default: float32, or saved patch dtype).")
         p.add_argument("--target-model", help=f"Hugging Face repo ID or local checkpoint directory (default: {QWEN}, or the patch's base).")
         p.add_argument("--revision", help="Hugging Face branch or commit (default: main, or the patch's base).")
 
@@ -184,7 +201,12 @@ def main(argv=None):
     def model_options(p):
         checkpoint_options(p)
         p.add_argument("--eval", default="gsm8k", help="Eval JSON file, or gsm8k / gsm8k:N (default: 30 GSM8K test problems).")
-        p.add_argument("--max-new-tokens", type=int, default=1024)
+        p.add_argument("--max-new-tokens", type=int, default=8192, help="Maximum generated tokens per answer (default: 8192).")
+        p.add_argument("--temperature", type=float, default=0.0, help="0 for greedy; positive values enable sampling.")
+        p.add_argument("--top-p", type=float, default=0.95)
+        p.add_argument("--top-k", type=int, default=20)
+        p.add_argument("--presence-penalty", type=float, default=0.0)
+        p.add_argument("--seed", type=int, default=0, help="Sampling seed; paired by prompt across before/after runs.")
         p.add_argument("--thinking", action="store_true", help="Enable reasoning mode if supported by the target chat template.")
         p.add_argument("--device", choices=("cpu", "mps", "cuda"), default="cpu")
 
@@ -231,6 +253,11 @@ def main(argv=None):
         except ImportError:
             raise ValueError("Install local model support with: uv tool install '.[local]'") from None
         args.target_model, args.revision = _target(args)
+        if args.dtype is None:
+            args.dtype = "float32"
+            if args.command in ("eval", "export") and args.patch:
+                from .patchfile import read_manifest
+                args.dtype = read_manifest(args.patch).get("dtype", "float32")
         try:
             if args.command == "download":
                 from .model import checkpoint_for, fingerprint

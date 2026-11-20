@@ -17,6 +17,7 @@ class Probe:
         self.model, self.tokenizer, self.generator = model, tokenizer, generator
         self.weights, self.practice = weights, practice
         self.budget, self.used = budget, 0
+        self.measurements = {}
         self.last = []  # outputs from the latest run_practice
 
     def _spend(self):
@@ -26,12 +27,17 @@ class Probe:
 
     def run_practice(self, request):
         ids, n = request.get("ids"), request.get("n_random")
-        if ids:
+        if ids is not None:
+            if not isinstance(ids, list) or not ids:
+                raise ValueError("ids must be a nonempty list of practice indices.")
             if any(type(i) is not int or not 0 <= i < len(self.practice) for i in ids):
                 raise ValueError(f"ids must be within 0..{len(self.practice) - 1}.")
             chosen = list(dict.fromkeys(ids))[:32]
         else:
-            chosen = random.Random(self.used).sample(range(len(self.practice)), min(int(n or 8), 32, len(self.practice)))
+            n = 8 if n is None else n
+            if type(n) is not int or not 1 <= n <= 32 or not self.practice:
+                raise ValueError("n_random must be 1..32 and practice data must be nonempty.")
+            chosen = random.Random(0).sample(range(len(self.practice)), min(n, len(self.practice)))
         self._spend()
         from .benchmark import is_correct
 
@@ -43,11 +49,33 @@ class Probe:
             self.last.append({"id": i, "prompt": case["prompt"], **out, "correct": ok})
             rows.append({"id": i, "correct": ok, "reached_token_limit": out["reached_token_limit"],
                          "tokens": out["generated_tokens"], "ending": out["raw_output"][-160:]})
-        return {
+        result = {
             "accuracy": sum(r["correct"] for r in rows) / len(rows),
             "reached_token_limit": sum(r["reached_token_limit"] for r in rows),
             "n": len(rows), "results": rows, "passes_left": self.budget - self.used,
         }
+
+        self.measurements[(self.weights.state(), tuple(chosen))] = result
+        return {**result, "validation": self.validation()}
+
+    def validation(self):
+        state = self.weights.state()
+        comparisons = []
+        tested = False
+        for (measured_state, ids), result in self.measurements.items():
+            if measured_state != state:
+                continue
+            tested = True
+            baseline = self.measurements.get(((), ids))
+            if baseline is not None:
+                comparisons.append({"ids": list(ids), "before_accuracy": baseline["accuracy"],
+                                    "after_accuracy": result["accuracy"],
+                                    "before_token_limit_hits": baseline["reached_token_limit"],
+                                    "after_token_limit_hits": result["reached_token_limit"]})
+        status = "unmodified" if not state else "untested"
+        if state and tested:
+            status = "paired" if comparisons else "tested_without_matching_baseline"
+        return {"status": status, "weight_state": list(state), "comparisons": comparisons}
 
     def _group(self, spec):
         """'looping' | 'finished' | 'correct' | 'wrong' (from the last run), or a list of texts."""

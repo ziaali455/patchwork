@@ -28,6 +28,8 @@ class Weights:
     def __init__(self, model, budget_fraction=0.001, edit_pattern=None):
         from transformers.pytorch_utils import Conv1D
 
+        if not math.isfinite(budget_fraction) or not 0 < budget_fraction <= 1:
+            raise ValueError("Parameter budget must be a fraction in (0, 1].")
         self.tensors, self.layer_of = {}, {}
         self.transposed = set()
         pattern = re.compile(edit_pattern or DOWN_PROJECTION)
@@ -55,9 +57,16 @@ class Weights:
         if not self.tensors:
             raise ValueError("No editable text MLP down-projection matrices found. "
                              "Use --edit-pattern for a different Transformers layout.")
+        for name in list(self.tensors):
+            bias_name = name.removesuffix("weight") + "bias"
+            bias = dict(model.named_parameters()).get(bias_name)
+            if bias is not None and bias.is_floating_point():
+                self.tensors[bias_name] = bias.reshape(1, -1)
+                self.layer_of[bias_name] = self.layer_of[name]
         self.catalog = {name: list(param.shape) for name, param in self.tensors.items()}
         self.budget = int(sum(p.numel() for p in model.parameters()) * budget_fraction)
         self.directions: dict[str, torch.Tensor] = {}
+        self.next_edit_id = 1
         self.history = []  # applied edits, each with exact original values for revert
 
     # Selecting columns -----------------------------------------------------
@@ -132,12 +141,16 @@ class Weights:
         if self.touched() + len(cols) * matrix.shape[0] > self.budget:
             raise ValueError(f"Edit would exceed the {self.budget:,}-parameter budget.")
         strength = edit.get("strength")
-        if type(strength) not in (int, float) or not 0 <= strength <= 2:
+        if edit.get("operation") != "set" and (type(strength) not in (int, float) or not 0 <= strength <= 2):
             raise ValueError("strength must be between 0 and 2.")
 
         values = matrix[:, cols].float()
         operation = edit.get("operation")
-        if operation == "scale":
+        if operation == "set":
+            updated = torch.tensor(edit.get("values"), dtype=torch.float32, device=matrix.device)
+            if updated.shape != values.shape:
+                raise ValueError(f"values must have shape {list(values.shape)}.")
+        elif operation == "scale":
             updated = values * strength
         elif operation == "project_out":
             if strength > 1:
@@ -151,13 +164,15 @@ class Weights:
                 direction = matrix[:, ref].float()
             else:
                 raise ValueError("project_out needs a direction name or a reference column.")
+            if direction.ndim != 1 or direction.numel() != matrix.shape[0]:
+                raise ValueError("Direction length must match the tensor row count.")
             norm = direction.norm()
             if norm.item() == 0 or not math.isfinite(norm.item()):
                 raise ValueError("Direction must have a finite, nonzero norm.")
             direction = direction / norm
             updated = values - strength * direction[:, None] * (direction @ values)
         else:
-            raise ValueError("operation must be scale or project_out.")
+            raise ValueError("operation must be set, scale or project_out.")
         updated = updated.to(matrix.dtype)
         if not torch.isfinite(updated).all():
             raise ValueError("Edit would create non-finite weights.")
@@ -166,8 +181,9 @@ class Weights:
         matrix[:, cols] = updated
         changed = int(torch.count_nonzero(updated != original))
         record = {k: v for k, v in edit.items()}
-        self.history.append({"tensor": name, "columns": cols.tolist(), "original": original,
+        self.history.append({"state_id": self.next_edit_id, "tensor": name, "columns": cols.tolist(), "original": original,
                              "edit": record, "changed": changed})
+        self.next_edit_id += 1
         return {"edit_id": len(self.history), "parameters_changed": changed,
                 "budget_used": self.touched(), "budget": self.budget}
 
@@ -180,6 +196,9 @@ class Weights:
             cols = torch.tensor(entry["columns"], device=self.tensors[entry["tensor"]].device)
             self.tensors[entry["tensor"]][:, cols] = entry["original"]
         return {"reverted": count, "edits_remaining": len(self.history)}
+
+    def state(self):
+        return tuple(entry["state_id"] for entry in self.history)
 
     def summary(self):
         return [{"tensor": e["tensor"], "columns": e["columns"], **{k: v for k, v in e["edit"].items()

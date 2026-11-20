@@ -5,15 +5,15 @@ from dataclasses import dataclass
 
 SYSTEM = """You are editing the weights of the target model identified in the session context to achieve the user's goal, without training or gradients.
 
-You can only touch MLP down-projection matrices (shape [hidden, intermediate]); each column is a vector the MLP writes into the residual stream. Tools:
+You can touch catalogued MLP output matrices and their biases (biases are presented as one-row matrices). Matrices are MLP down-projection matrices (shape [hidden, intermediate]); each column is a vector the MLP writes into the residual stream. Tools:
 - inspect_columns / align_columns: read weights (free).
-- run_practice: The target model answers practice problems (costs 1 forward pass). Shows accuracy, which answers hit the token limit (looping), and how each ends.
+- run_practice: The target model answers practice problems (costs 1 forward pass). Shows accuracy, which answers hit the token limit (possibly looping), and how each ends.
 - find_direction: average activation difference at a layer between two groups of texts (e.g. 'looping' vs 'finished' from the last practice run), stored under a name (costs 1 forward pass).
-- apply_edit: scale columns, or project a direction (stored name or reference column) out of columns. Applied immediately.
+- apply_edit: set explicit values in selected columns (including biases), scale columns, or project a direction (stored name or reference column) out of columns. Applied immediately.
 - revert_edit: undo the last edit or all edits, exactly.
 - finish: end the session.
 
-Forward passes are scarce, so plan each one. Work like a scientist: measure the failure, form a hypothesis about which component causes it, make a small targeted edit, then check it with a practice run. Keep edits that help, revert ones that don't. Before finishing, confirm with a practice run that the edits you keep actually help. If nothing helped, revert everything and say so honestly."""
+Forward passes are scarce, so plan each one. Work like a scientist: measure the failure, form a hypothesis about which component causes it, make a small targeted edit, then check it with a practice run. Keep edits that help, revert ones that don't. Use the same practice IDs before and after edits for a paired comparison. Before finishing, confirm with a practice run that the edits you keep actually help. If nothing helped, revert everything and say so honestly."""
 
 COLUMN_SELECT = {
     "tensor": {"type": "string"},
@@ -40,13 +40,14 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {
          "name": {"type": "string"}, "layer": {"type": "integer"}, "group_a": GROUP, "group_b": GROUP},
          "required": ["name", "layer", "group_a", "group_b"]}},
-    {"name": "apply_edit", "description": "Apply one edit now. scale: multiply columns by strength (0-2). project_out: remove strength (0-1) of a direction from columns; give `direction` (stored name) or `reference` (column index).",
+    {"name": "apply_edit", "description": "Apply one edit now. set: assign explicit values; strength is unused. scale: multiply columns by strength (0-2). project_out: remove strength (0-1) of a direction from columns; give `direction` (stored name) or `reference` (column index).",
      "input_schema": {"type": "object", "properties": {
          **COLUMN_SELECT,
-         "operation": {"enum": ["scale", "project_out"]},
+         "operation": {"enum": ["set", "scale", "project_out"]},
+         "values": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}, "description": "For set: [rows, selected columns] values; bias has one row."},
          "strength": {"type": "number", "minimum": 0, "maximum": 2},
          "direction": {"type": "string"}, "reference": {"type": "integer", "minimum": 0},
-         "rationale": {"type": "string"}}, "required": ["tensor", "operation", "strength", "rationale"]}},
+         "rationale": {"type": "string"}}, "required": ["tensor", "operation", "rationale"]}},
     {"name": "revert_edit", "description": "Undo the last edit, or all edits.",
      "input_schema": {"type": "object", "properties": {"which": {"enum": ["last", "all"]}}}},
     {"name": "finish", "description": "End the session.",
@@ -73,6 +74,7 @@ def session(provider, model, goal, checkpoint, weights, probe, *, log_path,
         "goal": goal, "checkpoint": checkpoint, "tensors": weights.catalog,
         "parameter_budget": weights.budget, "forward_pass_budget": probe.budget,
         "practice_problems": len(probe.practice),
+        "practice_validation": probe.validation(),
     }
     messages = [{"role": "user", "content": json.dumps(context)}]
     usage = {"input_tokens": 0, "output_tokens": 0, "turns": 0}
@@ -123,6 +125,8 @@ def session(provider, model, goal, checkpoint, weights, probe, *, log_path,
                     content, error = str(exc), True
                 record("tool", {"name": name, "input": args, "output": content, "error": error})
                 results.append((call_id, content, error))
+                if finished:
+                    break
 
             if finished:
                 break

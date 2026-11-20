@@ -35,8 +35,8 @@ def fingerprint(checkpoint: Path) -> str:
     return digest.hexdigest()
 
 
-def load(checkpoint: Path, device: str):
-    """Load in float32 with gradients off everywhere."""
+def load(checkpoint: Path, device: str, dtype="float32"):
+    """Load floating-point weights with gradients disabled."""
     import transformers
 
     options = {"local_files_only": True, "trust_remote_code": False}
@@ -48,7 +48,7 @@ def load(checkpoint: Path, device: str):
         if cls is None:
             continue
         try:
-            model = cls.from_pretrained(checkpoint, dtype="float32", use_safetensors=use_safetensors,
+            model = cls.from_pretrained(checkpoint, dtype=dtype, use_safetensors=use_safetensors,
                                         **options)
             break
         except (ValueError, KeyError) as exc:

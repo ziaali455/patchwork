@@ -17,9 +17,9 @@ class AnthropicEditor:
     def __init__(self, api):
         self.api = api
 
-    def turn(self, model, messages):
-        response = self.api.messages.create(model=model, max_tokens=8000, system=editor.SYSTEM,
-                                            tools=editor.TOOLS, messages=messages)
+    def turn(self, model, messages, *, system=editor.SYSTEM, use_tools=True, max_output_tokens=8000):
+        response = self.api.messages.create(model=model, max_tokens=max_output_tokens, system=system,
+                                            tools=editor.TOOLS if use_tools else [], messages=messages)
         return editor.Turn(
             history=[{"role": "assistant", "content": response.content}],
             log=[block.model_dump() for block in response.content],

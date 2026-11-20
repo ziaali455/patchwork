@@ -1,6 +1,7 @@
 """Connect editor tool calls to a provider's wire format."""
 import json
 import os
+import time
 from contextlib import contextmanager
 
 import httpx
@@ -20,10 +21,10 @@ class OpenAIEditor:
         self.client = client
         self.tools = [{"type": "function", "strict": False, **tool} for tool in _function_tools()]
 
-    def turn(self, model, messages):
+    def turn(self, model, messages, *, system=editor.SYSTEM, use_tools=True, max_output_tokens=8000):
         data = _post(self.client, "responses", {
-            "model": model, "instructions": editor.SYSTEM, "input": messages,
-            "tools": self.tools, "max_output_tokens": 8000, "store": False,
+            "model": model, "instructions": system, "input": messages,
+            "tools": self.tools if use_tools else [], "max_output_tokens": max_output_tokens, "store": False,
             "include": ["reasoning.encrypted_content"],
         })
         if data.get("status") == "failed":
@@ -50,10 +51,10 @@ class ChatEditor:
         self.client = client
         self.tools = [{"type": "function", "function": tool} for tool in _function_tools()]
 
-    def turn(self, model, messages):
+    def turn(self, model, messages, *, system=editor.SYSTEM, use_tools=True, max_output_tokens=8000):
         data = _post(self.client, "chat/completions", {
-            "model": model, "messages": [{"role": "system", "content": editor.SYSTEM}, *messages],
-            "tools": self.tools, "max_tokens": 8000,
+            "model": model, "messages": [{"role": "system", "content": system}, *messages],
+            "tools": self.tools if use_tools else [], "max_tokens": max_output_tokens,
         })
         choice = data["choices"][0]
         message = choice["message"]
@@ -77,7 +78,14 @@ def _output(content, error):
 
 
 def _post(client, endpoint, payload):
-    response = client.post(endpoint, json=payload)
+    for attempt in range(3):
+        try:
+            response = client.post(endpoint, json=payload)
+            break
+        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError):
+            if attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
     if response.is_error:
         raise ValueError(f"Editor API returned HTTP {response.status_code}: {response.text[:1000]}")
     return response.json()

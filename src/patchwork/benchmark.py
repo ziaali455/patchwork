@@ -6,6 +6,8 @@ Cases come from a JSON file ([{"prompt", "answer"}, ...]) or a built-in spec:
 Practice cases (what the editor gets to try during editing) default to the GSM8K
 *train* split, so the editor never sees the evaluation set.
 """
+import hashlib
+import math
 import json
 import re
 from pathlib import Path
@@ -79,9 +81,15 @@ def is_correct(answer: str, expected: str) -> bool:
 class Generator:
     """Greedy decoding: deterministic, so before/after differences come from the edit alone."""
 
-    def __init__(self, model, tokenizer, *, max_new_tokens, thinking):
+    def __init__(self, model, tokenizer, *, max_new_tokens, thinking, temperature=0.0,
+                 top_p=0.95, top_k=20, presence_penalty=0.0, seed=0):
         from transformers import GenerationConfig
 
+        if max_new_tokens < 1 or not math.isfinite(temperature) or temperature < 0:
+            raise ValueError("Token limit must be positive and temperature finite and nonnegative.")
+        if not 0 < top_p <= 1 or top_k < 0 or not math.isfinite(presence_penalty):
+            raise ValueError("Require 0 < top-p <= 1, top-k >= 0 and finite presence penalty.")
+        self.seed, self.presence_penalty = seed, presence_penalty
         self.model, self.tokenizer = model, tokenizer
         self.max_new_tokens, self.thinking = max_new_tokens, thinking
         original = model.generation_config
@@ -89,6 +97,11 @@ class Generator:
             eos_token_id=original.eos_token_id, pad_token_id=original.pad_token_id,
             bos_token_id=original.bos_token_id, do_sample=False, use_cache=True,
         )
+        if temperature > 0:
+            self.config.do_sample = True
+            self.config.temperature = temperature
+            self.config.top_p = top_p
+            self.config.top_k = top_k
         self.think_end = tokenizer.convert_tokens_to_ids("</think>") if "</think>" in tokenizer.get_vocab() else None
 
     def format(self, prompt):
@@ -105,9 +118,28 @@ class Generator:
         limit = limit or self.max_new_tokens
         inputs = self.tokenizer(self.format(prompt), return_tensors="pt", add_special_tokens=False).to(self.model.device)
         self.config.max_new_tokens = limit
-        with torch.inference_mode():
+        prompt_length = inputs["input_ids"].shape[1]
+        processors = []
+        if self.presence_penalty:
+            from transformers import LogitsProcessorList
+
+            seen = None
+
+            def penalize_present(input_ids, scores):
+                nonlocal seen
+                if seen is None:
+                    seen = torch.zeros_like(scores, dtype=torch.bool)
+                if input_ids.shape[1] > prompt_length:
+                    seen.scatter_(1, input_ids[:, -1:], True)
+                return scores - seen.to(scores.dtype) * self.presence_penalty
+
+            processors = LogitsProcessorList([penalize_present])
+        prompt_seed = (self.seed + int.from_bytes(hashlib.sha256(prompt.encode()).digest()[:4], "big")) % 2**32
+        devices = [self.model.device.index or 0] if self.model.device.type == "cuda" else []
+        with torch.inference_mode(), torch.random.fork_rng(devices=devices):
+            torch.manual_seed(prompt_seed)
             start = perf_counter()
-            generated = self.model.generate(**inputs, generation_config=self.config)
+            generated = self.model.generate(**inputs, generation_config=self.config, logits_processor=processors)
             seconds = perf_counter() - start
         tokens = generated[0, inputs["input_ids"].shape[1]:].tolist()
         raw = self.tokenizer.decode(tokens, skip_special_tokens=False)

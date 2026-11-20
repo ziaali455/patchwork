@@ -10,13 +10,13 @@ The editor can call the following local tools. Patchwork validates and executes 
 
 | Tool | What it does | Cost |
 |---|---|---|
-| `inspect_columns`, `align_columns` | Read MLP down-projection weights; find columns aligned with a direction | free |
+| `inspect_columns`, `align_columns` | Read MLP output weights and biases; find columns aligned with a direction | free |
 | `run_practice` | The target answers practice problems and the editor sees accuracy, token-limit hits, and output endings | 1 forward pass |
 | `find_direction` | Mean activation difference between two groups of texts (e.g. looping vs finished) at a layer | 1 forward pass |
-| `apply_edit` | `scale` columns, or `project_out` a direction (measured, or an existing column) | applied immediately |
+| `apply_edit` | `set` explicit column values, `scale` columns, or `project_out` a direction (measured, or an existing column) | applied immediately |
 | `revert_edit` | Undo the last edit or all edits, exactly | free |
 
-Forward passes are the scarce resource. In the paper, 10–25 barely helped and 50 is where the fix landed, so the default budget is 50. Every edit is validated (finite values, no overlaps, a parameter budget of 0.1% of weights by default).
+Forward passes are the scarce resource. In the paper, 10–25 barely helped and 50 is where the fix landed, so the default budget is 50. An initial practice baseline uses one pass. Subsequent default practice calls use the same problem IDs for paired comparisons. Every edit is validated (finite values, no overlaps, a parameter budget of 0.1% of weights by default).
 
 Practice uses the GSM8K **train** split (or your `--practice` file). Evaluation uses the **test** split (or your `--eval` file). The editor receives the goal, tensor catalog, and tool results, including practice output excerpts. Evaluation data stays local.
 
@@ -31,7 +31,7 @@ uv tool install '.[local]'
 patchwork --help
 ```
 
-The default device is CPU. Pass `--device mps` on Apple Silicon or `--device cuda` with a CUDA build of PyTorch.
+The default device is CPU. Pass `--device mps --dtype float16` on memory-constrained Apple Silicon machines or `--device cuda` with a CUDA build of PyTorch.
 
 ## Run your first patch
 
@@ -99,13 +99,13 @@ Evaluation and export infer the base target and revision from the patch. For a l
 
 ```
 runs/loops/
-  patch.safetensors   only the changed weights (flat indices + float32 deltas)
+  patch.safetensors   changed indices with exact original and replacement values
   manifest.json       goal, base revision + sha256 fingerprint, edits, stats
   report.json         settings, editor summary, token usage, per-case before/after
   transcript.jsonl    editor messages and tool calls, for auditing
 ```
 
-A patch applies only to the exact checkpoint it was made from (checked by fingerprint), and `apply` with the deltas negated removes it. Patches are KB to a few MB instead of a 3 GB checkpoint, which makes them easy to share.
+New patches store exact original and replacement values, so applying and removing them preserves the evaluated weights exactly. Application checks the checkpoint fingerprint and current source values, and validates all entries before changing any tensor. Older version 1 delta patches remain readable, with their original rounding limitations. Patches are KB to a few MB instead of a 3 GB checkpoint, which makes them easy to share.
 
 ## Custom goals
 
@@ -113,8 +113,8 @@ Bring your own data: `--practice` and `--eval` take JSON arrays of `{"prompt": .
 
 ## Notes
 
-- Decoding is greedy, so before and after differ only because of the edit. Compare runs with identical device, token limit, thinking mode, and eval data.
-- CPU generation is slow. With `--thinking`, answers are long; the paper allowed 32k tokens, the default here is 1,024, which counts long-but-fine answers as hitting the limit.
+- Decoding defaults to greedy. Set `--temperature` above zero to enable sampling; `--top-p`, `--top-k`, `--presence-penalty` and `--seed` control sampling. Seeds are derived per prompt for paired comparisons. Reports record these settings. Compare runs on the same device and software versions.
+- CPU generation is slow. With `--thinking`, answers are long; the paper allowed 32k tokens, the default here is 8,192; `--max-new-tokens` overrides it for both `patch` and `eval`. A shorter cap can count valid long reasoning as hitting the limit.
 - Weight editing removes obstacles more readily than it adds abilities. In the paper, it fixed Qwen's loops but couldn't improve a model that didn't loop.
 
 ## Development
@@ -123,3 +123,78 @@ Bring your own data: `--practice` and `--eval` take JSON arrays of `{"prompt": .
 uv run --extra local python tests/test_offline.py   # tiny random models + fake editors, no model downloads
 ```
 # patchwork
+
+## Output token limits and sampling
+
+`--max-new-tokens` limits each target answer, including thinking tokens. It is separate from `--token-budget`, which limits editor usage. The default is 8,192 tokens.
+
+```sh
+patchwork eval --thinking --max-new-tokens 32768 --eval gsm8k:10
+patchwork patch --prompt "Reduce reasoning loops" --thinking \
+  --max-new-tokens 32768 --temperature 0.6 --top-p 0.95 --top-k 20 \
+  --presence-penalty 1.5 --seed 0 --output runs/sampled
+```
+
+`report.json` records `practice_validation` for the retained weight state. Its status is `unmodified`, `untested`, `tested_without_matching_baseline`, or `paired`. Paired results include before/after accuracy and token-limit counts on identical practice IDs. This evidence is separate from the editor's `helped` claim and the final held-out benchmark. A paired comparison can show regression or no improvement. Edits retained after a turn or token budget ends are explicitly marked untested when appropriate.
+
+Direct assignments use `apply_edit` with `operation: "set"`, selected columns and a two-dimensional `values` array shaped `[rows, selected_columns]`. Biases are exposed as one-row matrices. Direct assignments obey the same touched-parameter budget and exact revert behavior as other edits.
+
+## Breakout networks from prompts
+
+Install the optional game dependencies with `uv pip install -e '.[local,breakout]'` in your environment, or `uv tool install --force '.[local,breakout]'` for the CLI installation.
+
+```sh
+patchwork breakout prompt > breakout-prompt.txt
+```
+
+Give that prompt to an editor in a fresh chat with tools disabled. Save the response as `attempt.md`, including its fenced `edits` block. The CLI imports the numbers into a zero-initialized 600 → 32 → 32 → 6 network and runs it locally.
+
+```sh
+patchwork breakout apply attempt.md attempt.npz
+patchwork breakout evaluate --weights zero attempt.npz --episodes 100 --output result.json
+```
+
+To compare the published checkpoint, supply its location explicitly:
+
+```sh
+patchwork breakout evaluate --weights zero reference attempt.npz \
+  --reference ../wsp-local/lm_understand-logs/exp5_write_from_scratch/networks/breakout/hand.npz \
+  --episodes 100 --output comparison.json
+```
+
+For a revision, save the editor's incremental response and use `breakout apply revision.md revision.npz --base attempt.npz`. Omit `--base` for a full replacement from zeros. Use fresh evaluation seeds after selecting a candidate, for example `--episodes 1000 --seed 10000`.
+
+Breakout uses sampled actions, 0.1 sticky actions and a 10,000-step cap. Reports include episode seeds, scores, standard errors and checkpoint hashes. Local RNG choices differ from the publication. Invalid edits reject the entire import. Breakout saves NumPy network checkpoints and accepts either provider API responses or manually supplied responses through `breakout run --editor-mode`. The language-model editing loop saves sparse patch files.
+
+The bundled prompt comes from Rikiya Takehi, Jayden Teoh, Alex Zhang and Omar Khattab's [Experiment 5](https://github.com/RikiyaT/lm_understand-logs/tree/main/exp5_write_from_scratch), licensed CC BY 4.0. The MinAtar source embedded in it is by Kenny Young and Tian Tian under GPL-3.0; its license is bundled alongside the prompt.
+
+Additional regression checks: `uv run --extra local python tests/test_regressions.py`.
+
+## Choose API or manual Breakout editing
+
+Use `breakout run --editor-mode api` to request weights from a provider and evaluate them automatically:
+
+```sh
+patchwork breakout run --editor-mode api \
+  --editor-provider openai --editor-model gpt-6-astra \
+  --episodes 100 --output runs/breakout-api
+```
+
+Provider credentials and endpoint flags match `patchwork patch`. Anthropic defaults to Sonnet when `--editor-model` is omitted. OpenAI and OpenAI-compatible endpoints require a model ID. `--editor-max-tokens` controls the editor response length (default 16,384).
+
+The default `--rounds 1` requests a single response with no tools or gameplay feedback. Set `--rounds 3` for three attempts, with aggregate practice results supplied after each of the first two. Each response specifies a complete network from zeros. Patchwork keeps the candidate with the highest mean practice reward, including the zero-weight baseline as a candidate.
+
+For a response obtained in a chat, choose manual mode:
+
+```sh
+patchwork breakout run --editor-mode manual --reply attempt.md \
+  --episodes 100 --output runs/breakout-manual
+```
+
+Manual mode makes no provider calls. Repeat `--reply` to compare several complete candidate responses. For incremental edits, use the existing `breakout apply --base` command. `--notes` records provenance, such as exposure to the published solution.
+
+Both modes save the prompt, responses, candidate `.npz` files, `selected.npz`, and `report.json`. The report includes practice scores, selection, provider token usage, and final before/after scores on a disjoint seed range. `--seed` defaults to 0 for practice and `--eval-seed` to 10,000 for final evaluation; `--episodes` controls both sample sizes. Final evaluation results are kept out of editor feedback. Existing output directories are rejected. Invalid or refused API responses leave an explicitly failed report and the received response for inspection.
+
+Provider integration tests use simulated responses: `uv run --extra local --extra breakout python tests/test_breakout_editors.py`.
+
+`--dtype` accepts `float32` (default), `float16`, or `bfloat16`. Patches record the selected dtype, and `eval --patch` and `export --patch` infer it. Use a dtype supported by your device. Float16 reduces weight memory use on an M1 Mac.

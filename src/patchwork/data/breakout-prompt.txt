@@ -1,0 +1,172 @@
+YOUR TASK: write, from scratch, the weights of a policy network that plays this game as well as possible. There is no training: no data, no loss, no gradients, no fine-tuning; you choose every number yourself. You have no tools: no code execution, no calculator, nothing to run. This is a single response and you will get no feedback. First describe your design briefly (the strategy, and what the hidden units compute), then write the edits block.
+
+THE GAME: Breakout from MinAtar (Young & Tian 2019), on a 10 x 10 grid. The player moves a one-cell paddle along the bottom row and must bounce a ball to break 3 rows of bricks near the top. Each brick broken gives +1; when all bricks are cleared, 3 new rows appear. The ball moves only diagonally; when it hits the paddle it is sent up to the left or to the right depending on the side of the paddle it hits; it is reflected by walls and bricks. The episode ends when the ball reaches the bottom row without being caught.
+Actions: left and right move the paddle; up, down and fire do nothing (they act as no-op).
+
+The game's exact implementation (the MinAtar package, version 1.0.15, file minatar/environments/breakout.py) follows. The environment wrapper calls act(a) with a = 0..5 meaning 'n' (no-op), 'l', 'u', 'r', 'd', 'f' (this file's action_map), and with probability 0.1 it repeats the previous action instead of the new one (sticky actions). The observation the network gets is built from this file's state() as described under THE INPUT.
+
+```python
+################################################################################################################
+# Authors:                                                                                                     #
+# Kenny Young (kjyoung@ualberta.ca)                                                                            #
+# Tian Tian (ttian@ualberta.ca)                                                                                #
+################################################################################################################
+import numpy as np
+
+
+#####################################################################################################################
+# Env
+#
+# The player controls a paddle on the bottom of the screen and must bounce a ball tobreak 3 rows of bricks along the
+# top of the screen. A reward of +1 is given for each brick broken by the ball.  When all bricks are cleared another 3
+# rows are added. The ball travels only along diagonals, when it hits the paddle it is bounced either to the left or
+# right depending on the side of the paddle hit, when it hits a wall or brick it is reflected. Termination occurs when
+# the ball hits the bottom of the screen. The balls direction is indicated by a trail channel.
+#
+#####################################################################################################################
+class Env:
+    def __init__(self, ramping=None):
+        self.channels ={
+            'paddle':0,
+            'ball':1,
+            'trail':2,
+            'brick':3,
+        }
+        self.action_map = ['n','l','u','r','d','f']
+        self.random = np.random.RandomState()
+        self.reset()
+
+    # Update environment according to agent action
+    def act(self, a):
+        r = 0
+        if(self.terminal):
+            return r, self.terminal
+
+        a = self.action_map[a]
+
+        # Resolve player action
+        if(a=='l'):
+            self.pos = max(0, self.pos-1)
+        elif(a=='r'):
+            self.pos = min(9,self.pos+1)
+
+        # Update ball position
+        self.last_x = self.ball_x
+        self.last_y = self.ball_y
+        if(self.ball_dir == 0):
+            new_x = self.ball_x-1
+            new_y = self.ball_y-1
+        elif(self.ball_dir == 1):
+            new_x = self.ball_x+1
+            new_y = self.ball_y-1
+        elif(self.ball_dir == 2):
+            new_x = self.ball_x+1
+            new_y = self.ball_y+1
+        elif(self.ball_dir == 3):
+            new_x = self.ball_x-1
+            new_y = self.ball_y+1
+
+        strike_toggle = False
+        if(new_x<0 or new_x>9):
+            if(new_x<0):
+                new_x = 0
+            if(new_x>9):
+                new_x=9
+            self.ball_dir=[1,0,3,2][self.ball_dir]
+        if(new_y<0):
+            new_y = 0
+            self.ball_dir=[3,2,1,0][self.ball_dir]
+        elif(self.brick_map[new_y,new_x]==1):
+            strike_toggle = True
+            if(not self.strike):
+                r+=1
+                self.strike = True
+                self.brick_map[new_y,new_x]=0
+                new_y = self.last_y
+                self.ball_dir=[3,2,1,0][self.ball_dir]
+        elif(new_y == 9):
+            if(np.count_nonzero(self.brick_map)==0):
+                self.brick_map[1:4,:] = 1
+            if(self.ball_x == self.pos):
+                self.ball_dir=[3,2,1,0][self.ball_dir]
+                new_y = self.last_y
+            elif(new_x == self.pos):
+                self.ball_dir=[2,3,0,1][self.ball_dir]
+                new_y = self.last_y
+            else:
+                self.terminal = True
+
+        if(not strike_toggle):
+            self.strike = False
+
+        self.ball_x = new_x
+        self.ball_y = new_y
+        return r, self.terminal
+
+    # Query the current level of the difficulty ramp, difficulty does not ramp in this game, so return None
+    def difficulty_ramp(self):
+        return None
+
+    # Process the game-state into the 10x10xn state provided to the agent and return
+    def state(self):
+        state = np.zeros((10,10,len(self.channels)),dtype=bool)
+        state[self.ball_y,self.ball_x,self.channels['ball']] = 1
+        state[9,self.pos, self.channels['paddle']] = 1
+        state[self.last_y,self.last_x,self.channels['trail']] = 1
+        state[:,:,self.channels['brick']] = self.brick_map
+        return state
+
+    # Reset to start state for new episode
+    def reset(self):
+        self.ball_y = 3
+        ball_start = self.random.randint(2)
+        self.ball_x, self.ball_dir = [(0,2),(9,3)][ball_start]
+        self.pos = 4
+        self.brick_map = np.zeros((10,10))
+        self.brick_map[1:4,:] = 1
+        self.strike = False
+        self.last_x = self.ball_x
+        self.last_y = self.ball_y
+        self.terminal = False
+
+    # Dimensionality of the game-state (10x10xn)
+    def state_shape(self):
+        return [10,10,len(self.channels)]
+
+    # Subset of actions that actually have a unique impact in this environment
+    def minimal_action_set(self):
+        minimal_actions = ['n','l','r']
+        return [self.action_map.index(x) for x in minimal_actions]
+
+```
+
+THE INPUT (600 numbers, each 0 or 1): the 10 x 10 grid (rows 0 top to 9 bottom, columns 0 left to 9 right) with 6 channels. Input number i = (row * 10 + column) * 6 + channel; for example input 0 is (row 0, column 0, channel 0), input 6 is (row 0, column 1, channel 0) and input 599 is (row 9, column 9, channel 5). In this game:
+  channel 0 (player): the paddle
+  channel 1 (danger): always empty in this game
+  channel 2 (reward): the bricks
+  channel 3 (projectile): the ball
+  channel 4 (trail): the ball's previous cell (it shows which way the ball moves)
+  channel 5 (gauge): always empty in this game
+THE OUTPUT (6 numbers, logits) for the actions 0 no-op, 1 left, 2 up, 3 right, 4 down, 5 fire; the action is sampled from the softmax of the logits. With probability 0.1 the game repeats the previous action instead (sticky actions).
+How the 6 channels are built from the game's own channels (state() in the source): channel 0 (player) <- paddle; channel 1 (danger) <- nothing; channel 2 (reward) <- brick; channel 3 (projectile) <- ball; channel 4 (trail) <- trail; channel 5 (gauge) <- nothing. A cell is 1 in a channel if any of its source channels is 1.
+
+THE NETWORK (the same architecture as the reinforcement-learning networks it will be compared with): a multilayer perceptron with 600 inputs, two hidden layers of 32 units with tanh activations, and 6 outputs; 20,486 parameters:
+  h1 = tanh(x @ W1 + b1)          W1: 600 x 32, b1: 32
+  h2 = tanh(h1 @ W2 + b2)         W2: 32 x 32,  b2: 32
+  logits = h2 @ W3 + b3           W3: 32 x 6,  b3: 6
+Row i of W1 holds the weights from input i to the 32 first-layer units; column j of a weight matrix belongs to unit j of the next layer. EVERY WEIGHT STARTS AT 0; you set the weights you need.
+
+HOW YOUR NETWORK IS SCORED: its mean score per episode over 1,000 episodes, each action sampled from the softmax of the logits (with the sticky actions above); an episode also stops after 10,000 steps. It is compared with networks of the same architecture trained by reinforcement learning on this game.
+
+HOW TO WRITE THE WEIGHTS (numbers only; nothing is run). Write a code block whose opening line is three backticks followed by the word edits, one statement per line ('#' starts a comment; a long list may continue over the next lines). Tensors: W1, b1, W2, b2, W3, b3.
+
+```edits
+W1[12, 0] = 2.5                     # one entry: row 12, column 0
+W1[0:6, 3] = [1, 0, -1, 0, 2, 0]    # explicit values along a range (as many values as entries)
+b1[0:4] = -1                        # fill a range (a:b is half-open; ':' alone = the whole axis)
+W1[3:600:60, 0] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1]   # column 0 of channel 3, rows 0..9 of the grid -> unit 0
+W2[0:2, 0:3] = [[1, -1, 0.5], [0, 2, 0]]   # a 2-D list for a 2-D block (here 2 x 3)
+W3[:, 2] *= 2                       # scale (also += and -=)
+```
+Ranges: a:b is half-open, a:b:s takes every s-th index. Input index i = (row * 10 + column) * 6 + channel. Useful strided ranges: all 10 cells of column c in channel ch are rows c*6+ch : 600 : 60 of W1; all 10 cells of row r in channel ch are rows r*60+ch : r*60+60 : 6.
+Statements apply in order; a later statement overwrites an earlier one. Only the LAST edits block of your reply is read; a statement that cannot be read is skipped (the others still apply). Values: plain decimal numbers (|v| <= 1e6).

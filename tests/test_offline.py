@@ -152,6 +152,7 @@ def test_editor_cli():
             assert report["editor_provider"] == provider and report["editor_summary"] == finish
             assert report["usage"] == {"input_tokens": 22, "output_tokens": 8, "turns": 2}
             assert report["parameters_changed"] == 32
+            assert report["practice_validation"]["status"] == "untested"
 
         assert main(["eval", "--patch", str(out), "--eval", str(evaluation), "--max-new-tokens", "2"]) == 0
         exported = tmp / "exported"
