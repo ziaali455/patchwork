@@ -6,3 +6,5 @@ __pycache__/
 /runs/
 *.safetensors
 dist/
+/desktop/node_modules/
+/desktop/out/

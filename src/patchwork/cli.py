@@ -28,17 +28,20 @@ def _load(args):
     from .model import checkpoint_for, fingerprint, load
 
     checkpoint = checkpoint_for(args.revision, args.target_model)
+    digest = fingerprint(checkpoint)
+    if args.expect_fingerprint and digest != args.expect_fingerprint:
+        raise ValueError("The checkpoint weights changed. Import the new checkpoint before using it.")
     print(f"Loading {args.target_model} ({checkpoint.name[:10]}) on {args.device}…", flush=True)
     model, tokenizer = load(checkpoint, args.device, args.dtype)
     generator = Generator(model, tokenizer, max_new_tokens=args.max_new_tokens, thinking=args.thinking,
                           temperature=args.temperature, top_p=args.top_p, top_k=args.top_k,
                           presence_penalty=args.presence_penalty, seed=args.seed)
-    return checkpoint, fingerprint(checkpoint), model, tokenizer, generator
+    return checkpoint, digest, model, tokenizer, generator
 
 
 def _target(args):
     base = {}
-    if args.command in ("eval", "export") and args.patch:
+    if args.command in ("eval", "export", "prompt") and args.patch:
         from .patchfile import read_manifest
 
         base = read_manifest(args.patch)["base"]
@@ -174,6 +177,28 @@ def export(args):
     print(f"Wrote a full patched checkpoint to {args.output}")
 
 
+def prompt_cmd(args):
+    from .patchfile import apply
+
+    prompt = args.prompt if args.prompt is not None else sys.stdin.read()
+    if not prompt.strip():
+        raise ValueError("Provide a prompt.")
+    _, fingerprint, model, _, generate = _load(args)
+    result = {}
+    if not args.patch or args.compare:
+        print("Generating base response…", flush=True)
+        result["base"] = generate(prompt)
+    if args.patch:
+        apply(model, args.patch, fingerprint)
+        print("Generating patched response…", flush=True)
+        result["patched"] = generate(prompt)
+    serialized = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    if args.json:
+        args.json.write_text(serialized, encoding="utf-8")
+    else:
+        print(serialized, end="")
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] in ("breakout", "car"):
@@ -201,11 +226,18 @@ def main(argv=None):
 
     download = commands.add_parser("download", help="Download the target checkpoint from Hugging Face.")
     checkpoint_options(download)
+    download.add_argument("--json", type=Path, help="Write the resolved checkpoint identity here.")
+    download.add_argument("--cached-only", action="store_true", help="Resolve the checkpoint without contacting Hugging Face.")
 
-    def model_options(p):
+    cache = commands.add_parser("cache", help="List cached text-generation checkpoints as JSON.")
+    cache.add_argument("--json", type=Path, help="Write the list to a file.")
+
+    def model_options(p, *, benchmark=True, tokens=8192):
         checkpoint_options(p)
-        p.add_argument("--eval", default="gsm8k", help="Eval JSON file, or gsm8k / gsm8k:N (default: 30 GSM8K test problems).")
-        p.add_argument("--max-new-tokens", type=int, default=8192, help="Maximum generated tokens per answer (default: 8192).")
+        p.add_argument("--expect-fingerprint", help="Require this SHA-256 checkpoint fingerprint.")
+        if benchmark:
+            p.add_argument("--eval", default="gsm8k", help="Eval JSON file, or gsm8k / gsm8k:N (default: 30 GSM8K test problems).")
+        p.add_argument("--max-new-tokens", type=int, default=tokens, help=f"Maximum generated tokens per answer (default: {tokens}).")
         p.add_argument("--temperature", type=float, default=0.0, help="0 for greedy; positive values enable sampling.")
         p.add_argument("--top-p", type=float, default=0.95)
         p.add_argument("--top-k", type=int, default=20)
@@ -236,6 +268,13 @@ def main(argv=None):
     ev.add_argument("--json", type=Path, default=None, help="Also write full results here.")
     model_options(ev)
 
+    prompt = commands.add_parser("prompt", help="Generate an answer from the base model or a patch.")
+    prompt.add_argument("--prompt", help="Prompt text. Reads stdin if omitted.")
+    prompt.add_argument("--patch", type=Path, default=None)
+    prompt.add_argument("--compare", action="store_true", help="Generate both base and patched answers.")
+    prompt.add_argument("--json", type=Path, help="Write the responses to this file.")
+    model_options(prompt, benchmark=False, tokens=512)
+
     ex = commands.add_parser("export", help="Write a full checkpoint with a patch applied.")
     ex.add_argument("--patch", type=Path, required=True)
     ex.add_argument("--output", type=Path, required=True)
@@ -256,20 +295,35 @@ def main(argv=None):
             from huggingface_hub.errors import LocalEntryNotFoundError
         except ImportError:
             raise ValueError("Install local model support with: uv tool install '.[local]'") from None
+        if args.command == "cache":
+            from .model import cached_checkpoints
+
+            output = json.dumps(cached_checkpoints()) + "\n"
+            if args.json:
+                args.json.write_text(output, encoding="utf-8")
+            else:
+                print(output, end="")
+            return 0
         args.target_model, args.revision = _target(args)
         if args.dtype is None:
             args.dtype = "float32"
-            if args.command in ("eval", "export") and args.patch:
+            if args.command in ("eval", "export", "prompt") and args.patch:
                 from .patchfile import read_manifest
                 args.dtype = read_manifest(args.patch).get("dtype", "float32")
         try:
             if args.command == "download":
                 from .model import checkpoint_for, fingerprint
 
-                path = checkpoint_for(args.revision, args.target_model, local_only=False)
-                print(f"{path}\nfingerprint {fingerprint(path)[:16]}")
+                path = checkpoint_for(args.revision, args.target_model, local_only=args.cached_only)
+                digest = fingerprint(path)
+                print(f"{path}\nfingerprint {digest[:16]}")
+                if args.json:
+                    local = Path(args.target_model).expanduser().is_dir()
+                    info = {"path": str(path), "fingerprint": digest,
+                            "revision": None if local else path.name}
+                    args.json.write_text(json.dumps(info) + "\n", encoding="utf-8")
             else:
-                {"patch": patch, "eval": evaluate_cmd, "export": export}[args.command](args)
+                {"patch": patch, "eval": evaluate_cmd, "export": export, "prompt": prompt_cmd}[args.command](args)
         except LocalEntryNotFoundError:
             command = shlex.join(["patchwork", "download", "--target-model", args.target_model,
                                   "--revision", args.revision])

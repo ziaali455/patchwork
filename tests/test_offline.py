@@ -4,6 +4,7 @@ Covers scoring, greedy generation, every editor tool, both HTTP protocols,
 exact revert, and patch replay and export for multiple target architectures.
 No downloads, no API key.  Run:  uv run --extra local python tests/test_offline.py
 """
+import io
 import json
 import sys
 import tempfile
@@ -153,6 +154,23 @@ def test_editor_cli():
             assert report["usage"] == {"input_tokens": 22, "output_tokens": 8, "turns": 2}
             assert report["parameters_changed"] == 32
             assert report["practice_validation"]["status"] == "untested"
+
+        identity = tmp / "identity.json"
+        assert main(["download", "--target-model", str(checkpoint), "--json", str(identity)]) == 0
+        checkpoint_info = json.loads(identity.read_text())
+        assert checkpoint_info["path"] == str(checkpoint.resolve())
+        assert checkpoint_info["revision"] is None and len(checkpoint_info["fingerprint"]) == 64
+
+        responses = tmp / "responses.json"
+        prompt_args = ["prompt", "--patch", str(out), "--compare", "--max-new-tokens", "2",
+                       "--json", str(responses), "--expect-fingerprint"]
+        assert main([*prompt_args, "wrong-fingerprint", "--prompt", "what is 1+1?"]) == 1
+        assert not responses.exists()
+        with patch("sys.stdin", io.StringIO("what is 1+1?")):
+            assert main([*prompt_args, checkpoint_info["fingerprint"]]) == 0
+        result = json.loads(responses.read_text())
+        assert result.keys() == {"base", "patched"}
+        assert all(0 < answer["generated_tokens"] <= 2 for answer in result.values())
 
         assert main(["eval", "--patch", str(out), "--eval", str(evaluation), "--max-new-tokens", "2"]) == 0
         exported = tmp / "exported"

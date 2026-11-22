@@ -33,6 +33,22 @@ patchwork --help
 
 The default device is CPU. Pass `--device mps --dtype float16` on memory-constrained Apple Silicon machines or `--device cuda` with a CUDA build of PyTorch.
 
+## Desktop app
+
+From the repository root, with Node.js 22.12 or newer:
+
+```sh
+uv sync --extra local
+npm --prefix desktop ci
+npm --prefix desktop run dev
+```
+
+**Run configuration → Target model** lists compatible-looking snapshots from the Hugging Face cache at startup. Select one to verify and register it locally. Open **Models** to download a new checkpoint or import a standalone Transformers directory. Use **Playground** to prompt a target and compare it with any committed version of that checkpoint. In **Editor settings**, choose Anthropic, OpenAI, or an OpenAI-compatible endpoint. The app reads `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `PATCHWORK_COMPATIBLE_API_KEY` from the environment or the repository's `.env`. You can also enter a key in the app, which uses the OS credential encryption available to Electron.
+
+Start an edit from **Edit**, then open its run in **History** to review the benchmark and write a commit message. Commits and run artifacts live in the app's local user-data folder. Each committed patch is based on a pinned checkpoint and can be compared in the playground or exported as a full Transformers checkpoint from History. The desktop workflow creates edits from base checkpoints.
+
+Run `npm --prefix desktop run build` to type-check and build the app, then `npm --prefix desktop start` to launch that build. Both modes use the repository's `.venv`. Set `PATCHWORK_PYTHON` to an absolute interpreter path to use a different Patchwork environment.
+
 ## Run your first patch
 
 1. Set `ANTHROPIC_API_KEY` to a key from the [Claude Console](https://platform.claude.com/). Requests use [API billing](https://platform.claude.com/docs/en/about-claude/pricing). Anthropic doesn't allow third-party tools to use Claude.ai subscription logins ([policy](https://code.claude.com/docs/en/legal-and-compliance)).
