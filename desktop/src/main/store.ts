@@ -4,7 +4,10 @@ import { dirname, join } from 'node:path'
 import { app, safeStorage } from 'electron'
 import type { EditorProfile, Provider, Workspace } from '../shared/types'
 
-type Store = Omit<Workspace, 'configuredKeys'> & { keys: Partial<Record<Provider, string>> }
+type Store = Omit<Workspace, 'configuredKeys'> & {
+  keys: Partial<Record<Provider, string>>
+  compatibleKeyEndpoint?: string
+}
 export const keyEnv: Record<Provider, string> = {
   anthropic: 'ANTHROPIC_API_KEY',
   openai: 'OPENAI_API_KEY',
@@ -42,16 +45,45 @@ export function updateStore(change: (store: Store) => void) {
 }
 
 export function workspace(): Workspace {
-  const { keys, ...data } = readStore()
+  const { keys, compatibleKeyEndpoint: endpoint, ...data } = readStore()
   const configuredKeys = Object.fromEntries(
     (Object.keys(keyEnv) as Provider[]).map(provider =>
-      [provider, Boolean(keys[provider] || process.env[keyEnv[provider]])]),
+      [provider, Boolean(process.env[keyEnv[provider]] || (
+        keys[provider] && (provider !== 'openai-compatible' ||
+          (data.editor.provider === provider && (!endpoint || endpoint === data.editor.endpoint)))
+      ))]),
   )
   return { ...data, configuredKeys }
 }
 
-export function editorKey(provider: Provider) {
-  const stored = readStore().keys[provider]
+function normalizeEndpoint(value: string) {
+  let endpoint: URL
+  try {
+    endpoint = new URL(value.trim())
+  } catch {
+    throw new Error('Enter the API base URL, such as http://localhost:8000/v1.')
+  }
+  if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password
+      || endpoint.search || endpoint.hash) {
+    throw new Error('Use an HTTP or HTTPS API base URL without credentials, a query, or a fragment.')
+  }
+  return endpoint.href.replace(/\/+$/, '')
+}
+
+export function editorConnection(connection: Pick<EditorProfile, 'provider' | 'endpoint'>, key?: string) {
+  const { provider } = connection
+  if (!Object.hasOwn(keyEnv, provider)) throw new Error('Choose an editor provider.')
+  const endpoint = provider === 'openai-compatible' ? normalizeEndpoint(connection.endpoint) : ''
+  const secret = key?.trim() || editorKey(provider, endpoint)
+  if (!secret && provider !== 'openai-compatible') throw new Error('Enter an API key for this provider.')
+  return { provider, endpoint, secret }
+}
+
+function editorKey(provider: Provider, endpoint: string) {
+  const store = readStore()
+  const allowedEndpoint = store.compatibleKeyEndpoint ??
+    (store.editor.provider === 'openai-compatible' ? store.editor.endpoint.trim().replace(/\/+$/, '') : '')
+  const stored = provider !== 'openai-compatible' || endpoint === allowedEndpoint ? store.keys[provider] : undefined
   return stored
     ? safeStorage.decryptString(Buffer.from(stored, 'base64'))
     : process.env[keyEnv[provider]]
@@ -60,21 +92,22 @@ export function editorKey(provider: Provider) {
 export function saveEditor(profile: EditorProfile, key?: string) {
   if (!Object.hasOwn(keyEnv, profile.provider)) throw new Error('Choose an editor provider.')
   const model = profile.model.trim()
-  const endpoint = profile.endpoint.trim()
   if (!model) throw new Error('Enter an editor model ID.')
-  if (profile.provider === 'openai-compatible') {
-    if (!endpoint || !['http:', 'https:'].includes(new URL(endpoint).protocol)) {
-      throw new Error('Enter an HTTP or HTTPS endpoint.')
-    }
-  }
+  const endpoint = profile.provider === 'openai-compatible' ? normalizeEndpoint(profile.endpoint) : ''
   const secret = key?.trim()
   if (secret && (!safeStorage.isEncryptionAvailable() ||
     (process.platform === 'linux' && safeStorage.getSelectedStorageBackend() === 'basic_text'))) {
     throw new Error('Secure credential storage is unavailable. Set the API key in the environment.')
   }
   updateStore(store => {
+    if (store.keys['openai-compatible'] && !store.compatibleKeyEndpoint && store.editor.provider === 'openai-compatible') {
+      store.compatibleKeyEndpoint = store.editor.endpoint.trim().replace(/\/+$/, '')
+    }
     store.editor = { provider: profile.provider, model, endpoint }
-    if (secret) store.keys[profile.provider] = safeStorage.encryptString(secret).toString('base64')
+    if (secret) {
+      store.keys[profile.provider] = safeStorage.encryptString(secret).toString('base64')
+      if (profile.provider === 'openai-compatible') store.compatibleKeyEndpoint = endpoint
+    }
   })
   return workspace()
 }

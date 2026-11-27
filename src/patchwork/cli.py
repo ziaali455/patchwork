@@ -217,7 +217,11 @@ def main(argv=None):
     commands.add_parser("car", help="Repair and evaluate Kinetix car policies; use car --help.")
     commands.add_parser("breakout", help="Author, import and evaluate small Breakout networks; use breakout --help.")
     commands.add_parser("login", help="Verify your ANTHROPIC_API_KEY.")
-    commands.add_parser("models", help="List Claude model IDs available to your key.")
+    models = commands.add_parser("models", help="List available editor models from a provider.")
+    models.add_argument("--editor-provider", choices=providers.PROVIDERS, default="anthropic")
+    models.add_argument("--editor-base-url", help="API root for OpenAI-compatible endpoints.")
+    models.add_argument("--editor-key-env", help="Environment variable containing the editor API key.")
+    models.add_argument("--json", type=Path, help="Write the catalog to a JSON file.")
 
     def checkpoint_options(p):
         p.add_argument("--dtype", choices=("float32", "float16", "bfloat16"), help="Target weight dtype (default: float32, or saved patch dtype).")
@@ -282,14 +286,19 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     try:
-        if args.command in ("login", "models"):
+        if args.command == "login":
             with claude.client() as api:
-                models = api.models.list()
-                if args.command == "login":
-                    print("Anthropic API key verified.")
-                else:
-                    for model in models:
-                        print(f"{model.id}\t{model.display_name}")
+                api.models.list()
+            print("Anthropic API key verified.")
+            return 0
+        if args.command == "models":
+            catalog = providers.list_models(args.editor_provider, base_url=args.editor_base_url,
+                                           key_env=args.editor_key_env)
+            if args.json:
+                args.json.write_text(json.dumps(catalog) + "\n", encoding="utf-8")
+            else:
+                for model in catalog:
+                    print(f"{model['id']}\t{model['label']}")
             return 0
         try:
             from huggingface_hub.errors import LocalEntryNotFoundError

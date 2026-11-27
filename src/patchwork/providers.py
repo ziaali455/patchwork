@@ -4,6 +4,7 @@ import os
 import time
 from contextlib import contextmanager
 
+import anthropic
 import httpx
 
 from . import claude, editor
@@ -118,31 +119,70 @@ def _post(client, endpoint, payload):
     return response.json()
 
 
-@contextmanager
-def connect(provider, model, *, base_url=None, key_env=None, timeout=300):
+def _check_provider(provider, base_url):
+    if provider not in PROVIDERS:
+        raise ValueError("Choose a supported editor provider.")
     if provider != "openai-compatible" and base_url is not None:
         raise ValueError("--editor-base-url requires --editor-provider openai-compatible.")
-    if provider == "anthropic":
-        with claude.client(key_env or "ANTHROPIC_API_KEY", timeout=timeout) as api:
-            api.models.retrieve(model)
-            yield claude.AnthropicEditor(api)
-        return
 
+
+def _openai_client(provider, base_url, key_env, timeout):
     if provider == "openai":
         base_url = "https://api.openai.com/v1/"
         key_env = key_env or "OPENAI_API_KEY"
-        adapter = OpenAIEditor
     else:
         if not base_url:
             raise ValueError("Provide --editor-base-url for the OpenAI-compatible endpoint.")
         url = httpx.URL(base_url)
         if url.scheme not in ("http", "https") or not url.host or url.userinfo or url.query or url.fragment:
             raise ValueError("--editor-base-url must be an HTTP(S) API root without credentials, query or fragment.")
-        adapter = ChatEditor
 
     key = os.environ.get(key_env) if key_env else None
     if key_env and not key:
         raise ValueError(f"Set {key_env} to use this editor endpoint.")
     headers = {"Authorization": f"Bearer {key}"} if key else {}
-    with httpx.Client(base_url=base_url.rstrip("/") + "/", headers=headers, timeout=timeout) as client:
+    return httpx.Client(base_url=base_url.rstrip("/") + "/", headers=headers, timeout=timeout)
+
+
+def list_models(provider, *, base_url=None, key_env=None):
+    """Read the provider catalog without sending a generation request."""
+    _check_provider(provider, base_url)
+    try:
+        if provider == "anthropic":
+            with claude.client(key_env or "ANTHROPIC_API_KEY", timeout=10) as api:
+                page = api.with_options(max_retries=0).models.list()
+                return [{"id": model.id, "label": model.display_name} for model in page]
+        with _openai_client(provider, base_url, key_env, timeout=10) as client:
+            response = client.get("models")
+            response.raise_for_status()
+            data = response.json()
+            if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+                raise ValueError("The endpoint returned an invalid model list.")
+            ids = {item["id"] for item in data["data"] if isinstance(item, dict)
+                   and isinstance(item.get("id"), str) and item["id"].strip()}
+            return [{"id": model_id, "label": model_id} for model_id in sorted(ids, key=str.casefold)]
+    except (anthropic.APIStatusError, httpx.HTTPStatusError) as exc:
+        status = exc.response.status_code
+        if status in (401, 403):
+            raise ValueError(f"The provider rejected access (HTTP {status}). Check the API key and its permissions.") from None
+        if status in (404, 405, 501) and provider == "openai-compatible":
+            raise ValueError(f"Model listing is unavailable at this endpoint (HTTP {status}). Check the base URL or enter a model ID manually.") from None
+        raise ValueError(f"The provider could not list models (HTTP {status}).") from None
+    except (anthropic.APIConnectionError, httpx.RequestError):
+        raise ValueError("Could not reach the provider to list models. Check the endpoint and try again.") from None
+    except json.JSONDecodeError:
+        raise ValueError("The endpoint returned an invalid model list.") from None
+
+
+@contextmanager
+def connect(provider, model, *, base_url=None, key_env=None, timeout=300):
+    _check_provider(provider, base_url)
+    if provider == "anthropic":
+        with claude.client(key_env or "ANTHROPIC_API_KEY", timeout=timeout) as api:
+            api.models.retrieve(model)
+            yield claude.AnthropicEditor(api)
+        return
+
+    adapter = OpenAIEditor if provider == "openai" else ChatEditor
+    with _openai_client(provider, base_url, key_env, timeout) as client:
         yield adapter(client)

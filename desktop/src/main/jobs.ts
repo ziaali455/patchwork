@@ -5,8 +5,8 @@ import { mkdtemp, mkdir, rename, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { app, BrowserWindow, dialog } from 'electron'
-import { editorKey, keyEnv, readJson, readStore, updateStore } from './store'
-import type { CachedTarget, JobEvent, JobRequest, Run, Target } from '../shared/types'
+import { editorConnection, keyEnv, readJson, readStore, updateStore } from './store'
+import type { CachedTarget, EditorModel, EditorProfile, JobEvent, JobRequest, Run, Target } from '../shared/types'
 
 const repository = join(app.getAppPath(), '..')
 let active: { child?: ChildProcess; cancelled: boolean } | undefined
@@ -71,19 +71,31 @@ type Report = Pick<Run, 'goal' | 'before' | 'after'> & {
   parameters_changed?: number
 }
 
-export async function cachedTargets() {
-  const temporary = await mkdtemp(join(tmpdir(), 'patchwork-cache-'))
-  const result = join(temporary, 'checkpoints.json')
+async function readPythonResult<T>(args: string[], env: NodeJS.ProcessEnv) {
+  const temporary = await mkdtemp(join(tmpdir(), 'patchwork-query-'))
+  const result = join(temporary, 'result.json')
   let log = ''
   try {
-    await runPython(['cache', '--json', result], { cancelled: false },
-      chunk => { log = (log + chunk).slice(-3000) }, process.env)
-    return readJson<CachedTarget[]>(result)
+    await runPython([...args, '--json', result], { cancelled: false },
+      chunk => { log = (log + chunk).slice(-3000) }, env)
+    return readJson<T>(result)
   } catch (error) {
     throw new Error(log.trim() || (error as Error).message)
   } finally {
     await rm(temporary, { recursive: true, force: true })
   }
+}
+
+export function cachedTargets() {
+  return readPythonResult<CachedTarget[]>(['cache'], process.env)
+}
+
+export function listEditorModels(connection: Pick<EditorProfile, 'provider' | 'endpoint'>, key?: string) {
+  const { provider, endpoint, secret } = editorConnection(connection, key)
+  return readPythonResult<EditorModel[]>(['models', '--editor-provider', provider,
+    ...(endpoint ? [`--editor-base-url=${endpoint}`] : []),
+    ...(secret ? ['--editor-key-env', keyEnv[provider]] : []),
+  ], { ...process.env, [keyEnv[provider]]: secret, PYTHONIOENCODING: 'utf-8' })
 }
 
 function modelArgs(target: Target) {
@@ -154,20 +166,17 @@ async function perform(request: JobRequest, window: BrowserWindow, selection: st
     }
 
     const editor = store.editor
-    const key = editorKey(editor.provider)
-    if (editor.provider !== 'openai-compatible' && !key) {
-      throw new Error('Add an API key in Editor settings before running an edit.')
-    }
-    if (key) env[keyEnv[editor.provider]] = key
+    const { provider, endpoint, secret } = editorConnection(editor)
+    if (secret) env[keyEnv[provider]] = secret
     const id = randomUUID()
     const output = runPath(id)
     await mkdir(join(output, '..'), { recursive: true })
     try {
       await run(['patch', ...args, '--dtype', request.dtype, `--prompt=${request.goal}`, '--passes',
         String(request.passes), '--eval', `gsm8k:${request.cases}`, '--output', output,
-        '--editor-provider', editor.provider, `--editor-model=${editor.model}`,
-        ...(editor.provider === 'openai-compatible' ? [
-          `--editor-base-url=${editor.endpoint}`, ...(key ? ['--editor-key-env', keyEnv[editor.provider]] : []),
+        '--editor-provider', provider, `--editor-model=${editor.model}`,
+        ...(provider === 'openai-compatible' ? [
+          `--editor-base-url=${endpoint}`, ...(secret ? ['--editor-key-env', keyEnv[provider]] : []),
         ] : []),
       ])
       const report = readJson<Report>(join(output, 'report.json'))

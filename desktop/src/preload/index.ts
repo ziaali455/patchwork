@@ -4,6 +4,7 @@ import type { DesktopAPI, JobEvent } from '../shared/types'
 const api: DesktopAPI = {
   workspace: () => ipcRenderer.invoke('workspace'),
   cachedTargets: () => ipcRenderer.invoke('cached-targets'),
+  listEditorModels: (connection, key) => ipcRenderer.invoke('list-editor-models', connection, key),
   saveEditor: (profile, key) => ipcRenderer.invoke('save-editor', profile, key),
   commit: (runId, message) => ipcRenderer.invoke('commit', runId, message),
   start: (job) => ipcRenderer.invoke('start-job', job),

@@ -8,7 +8,7 @@ import {
 } from 'lucide-react'
 import logo from '../../../logos/patchwork-logo.svg'
 import type {
-  Answer, CachedTarget, DesktopAPI, Device, Dtype, EditorProfile, JobEvent, JobRequest, Run, Target, Workspace,
+  Answer, CachedTarget, DesktopAPI, Device, Dtype, EditorModel, EditorProfile, JobEvent, JobRequest, Run, Target, Workspace,
 } from '../shared/types'
 import './style.css'
 
@@ -22,7 +22,7 @@ const pages = [
   { label: 'Models', icon: Layers3, subtitle: 'Download and manage the checkpoints in your workspace.' },
   { label: 'Edit', icon: WandSparkles, subtitle: 'Describe a behavior change and evaluate the resulting weight patch.' },
   { label: 'History', icon: History, subtitle: 'Review edit runs, write commits, and revisit saved model versions.' },
-  { label: 'Editor settings', icon: Settings2, subtitle: 'Connect the model that proposes and evaluates weight edits.' },
+  { label: 'Editor settings', icon: Settings2, subtitle: 'Choose the model Patchwork uses to propose weight edits.' },
 ] as const
 type Page = typeof pages[number]['label']
 
@@ -31,6 +31,7 @@ const providerLabels = {
   openai: 'OpenAI',
   'openai-compatible': 'OpenAI-compatible',
 }
+const editorProviders = ['anthropic', 'openai'] as const
 
 const date = (value: string) => new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(value))
 const percent = (value: number) => new Intl.NumberFormat(undefined, { style: 'percent', maximumFractionDigits: 1 }).format(value)
@@ -67,9 +68,46 @@ function Response({ answer, label, running }: { answer?: Answer; label: string; 
 }
 
 function EditorForm({ data, save }: { data: Workspace; save(profile: EditorProfile, key?: string): Promise<boolean> }) {
-  const [profile, setProfile] = useState(data.editor)
+  const [profile, setProfile] = useState<EditorProfile>(() => data.editor.provider === 'openai-compatible'
+    ? { provider: 'openai', model: '', endpoint: '' }
+    : data.editor)
   const [key, setKey] = useState('')
+  const [models, setModels] = useState<EditorModel[]>()
+  const [modelError, setModelError] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [manual, setManual] = useState(false)
   const [saving, setSaving] = useState(false)
+  const keyConfigured = data.configuredKeys[profile.provider]
+  const ready = Boolean(keyConfigured || key.trim())
+  const savedOption = profile.model && !models?.some(model => model.id === profile.model)
+
+  function resetCatalog() {
+    setModels(undefined)
+    setModelError('')
+  }
+
+  async function loadModels() {
+    const restartMessage = 'Quit Patchwork and restart it with npm --prefix desktop run dev, then try again.'
+    if (typeof api.listEditorModels !== 'function') {
+      setModelError(restartMessage)
+      return
+    }
+
+    setLoading(true)
+    setModelError('')
+    try {
+      const catalog = await api.listEditorModels({ provider: profile.provider, endpoint: profile.endpoint }, key)
+      setModels(catalog)
+      setManual(catalog.length === 0)
+    } catch (error) {
+      setModels(undefined)
+      const message = (error as Error).message.replace(/^Error invoking remote method '[^']+': Error: /, '').replace(/^patchwork: /, '')
+      setModelError(message.includes("No handler registered for 'list-editor-models'") ? restartMessage : message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault()
     setSaving(true)
@@ -77,24 +115,52 @@ function EditorForm({ data, save }: { data: Workspace; save(profile: EditorProfi
     setSaving(false)
   }
   return <Panel title="Editor connection" icon={<Settings2 size={17} />} className="narrow">
-    <form className="form-body" onSubmit={submit}>
-      <label>Provider<select value={profile.provider} onChange={event => {
-        const provider = event.target.value as EditorProfile['provider']
-        setProfile({ provider, model: provider === data.editor.provider ? data.editor.model : provider === 'anthropic' ? 'sonnet' : '',
-          endpoint: provider === data.editor.provider ? data.editor.endpoint : '' })
-        setKey('')
-      }}>
-        {Object.entries(providerLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-      </select></label>
-      <label>Editor model<input required value={profile.model} placeholder="Provider model ID"
-        onChange={event => setProfile({ ...profile, model: event.target.value })} /></label>
-      {profile.provider === 'openai-compatible' && <label>API base URL<input type="url" required value={profile.endpoint}
-        placeholder="http://localhost:8000/v1" onChange={event => setProfile({ ...profile, endpoint: event.target.value })} /></label>}
-      <label>API key <input type="password" autoComplete="off" value={key} onChange={event => setKey(event.target.value)}
-        placeholder={data.configuredKeys[profile.provider] ? 'Configured · enter a replacement key' : 'Enter an API key'} />
-        <small>{profile.provider === 'openai-compatible' ? 'Optional for endpoints without authentication.' : 'Required to run edits with this provider.'}</small>
-      </label>
-      <button className="primary" disabled={saving}>Save connection</button>
+    <form onSubmit={submit}>
+      <fieldset className="form-body connection-fields" disabled={loading || saving}>
+        <label>Provider<select value={profile.provider} onChange={event => {
+          const provider = event.target.value as typeof editorProviders[number]
+          setProfile(provider === data.editor.provider ? data.editor : { provider, model: '', endpoint: '' })
+          setKey('')
+          setManual(false)
+          resetCatalog()
+        }}>
+          {editorProviders.map(provider => <option key={provider} value={provider}>{providerLabels[provider]}</option>)}
+        </select></label>
+        <label>API key
+          <input type="password" autoComplete="off" value={key} onChange={event => {
+            setKey(event.target.value)
+            resetCatalog()
+          }} placeholder={keyConfigured ? 'Key configured' : 'Enter an API key'} />
+          <small>{keyConfigured ? 'Leave blank to reuse your configured key.'
+            : 'Enter a key from your provider account to load models and run edits.'}</small>
+        </label>
+        <div className="model-picker">
+          <div className="model-picker-heading">
+            <label htmlFor="editor-model">Editor model</label>
+            <button type="button" className="secondary" disabled={!ready} onClick={() => void loadModels()}>
+              {loading ? 'Loading models…' : models ? 'Refresh models' : 'Load models'}
+            </button>
+          </div>
+          {manual ? <input id="editor-model" required value={profile.model} placeholder="Enter the exact model ID"
+            onChange={event => setProfile({ ...profile, model: event.target.value })} />
+            : <select id="editor-model" value={profile.model} disabled={!models?.length}
+              onChange={event => setProfile({ ...profile, model: event.target.value })}>
+              <option value="" disabled>{models?.length ? 'Choose a model' : 'Load models to choose one'}</option>
+              {savedOption && <option value={profile.model}>{profile.model} (configured ID)</option>}
+              {models?.map(model => <option key={model.id} value={model.id}>
+                {model.label === model.id ? model.id : `${model.label} · ${model.id}`}
+              </option>)}
+            </select>}
+          {modelError && <small className="model-error" role="alert">{modelError}</small>}
+          {models && <small role="status">{models.length
+            ? `${models.length} models returned. Choose a text model that supports function calling.`
+            : 'The provider returned no models. You can enter a model ID manually.'}</small>}
+          <button type="button" className="text-button" onClick={() => setManual(!manual)}>
+            {manual ? 'Use model list' : 'Enter model ID manually'}
+          </button>
+        </div>
+        <button className="primary" disabled={!ready || !profile.model.trim()}>Save connection</button>
+      </fieldset>
     </form>
   </Panel>
 }

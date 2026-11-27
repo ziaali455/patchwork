@@ -96,6 +96,11 @@ h1 { margin: 0; font-size: 31px; line-height: 1.13; letter-spacing: -1px; font-w
 .text-button:hover { text-decoration: underline; }
 .form-body { display: grid; gap: 15px; padding: 17px; }
 .form-body > .primary { justify-self: start; }
+.connection-fields { margin: 0; border: 0; min-width: 0; }
+.model-picker { display: grid; gap: 7px; }
+.model-picker-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.model-picker-heading button { min-height: 30px; }
+.model-error { color: #ffd4cd; overflow-wrap: anywhere; }
 .form-body.compact { gap: 12px; padding: 14px 15px 15px; }
 label { display: grid; gap: 6px; color: #d7d9de; font-size: 12px; font-weight: 550; min-width: 0; }
 label small { line-height: 1.5; font-weight: 400; }

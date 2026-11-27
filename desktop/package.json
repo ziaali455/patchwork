@@ -5,7 +5,7 @@
   "private": true,
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "electron-vite dev --watch",
     "build": "tsc --noEmit && electron-vite build",
     "start": "electron-vite preview"
   },

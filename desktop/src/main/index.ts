@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { app, BrowserWindow, ipcMain } from 'electron'
-import { cachedTargets, cancelJob, startJob } from './jobs'
+import { cachedTargets, cancelJob, listEditorModels, startJob } from './jobs'
 import { saveEditor, updateStore, workspace } from './store'
 import type { EditorProfile, JobRequest } from '../shared/types'
 
@@ -52,6 +52,7 @@ if (!app.requestSingleInstanceLock()) {
 
     handle('workspace', workspace)
     handle('cached-targets', cachedTargets)
+    handle('list-editor-models', listEditorModels)
     handle('save-editor', (profile: EditorProfile, key?: string) => saveEditor(profile, key))
     handle('commit', (runId: string, message: string) => {
       const trimmed = message.trim()

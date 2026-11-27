@@ -43,7 +43,9 @@ npm --prefix desktop ci
 npm --prefix desktop run dev
 ```
 
-**Run configuration → Target model** lists compatible-looking snapshots from the Hugging Face cache at startup. Select one to verify and register it locally. Open **Models** to download a new checkpoint or import a standalone Transformers directory. Use **Playground** to prompt a target and compare it with any committed version of that checkpoint. In **Editor settings**, choose Anthropic, OpenAI, or an OpenAI-compatible endpoint. The app reads `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `PATCHWORK_COMPATIBLE_API_KEY` from the environment or the repository's `.env`. You can also enter a key in the app, which uses the OS credential encryption available to Electron.
+**Run configuration → Target model** lists compatible-looking snapshots from the Hugging Face cache at startup. Select one to verify and register it locally. Open **Models** to download a new checkpoint or import a standalone Transformers directory. Use **Playground** to prompt a target and compare it with any committed version of that checkpoint. In **Editor settings**, choose Anthropic or OpenAI. The app reads `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` from the environment or the repository's `.env`. You can also enter a key in the app, which uses the OS credential encryption available to Electron.
+
+In **Editor settings**, click **Load models** to read the provider's catalog with your configured or entered key. Choose a text model that supports function calling, then save the connection. You can also enter the exact model ID manually.
 
 Start an edit from **Edit**, then open its run in **History** to review the benchmark and write a commit message. Commits and run artifacts live in the app's local user-data folder. Each committed patch is based on a pinned checkpoint and can be compared in the playground or exported as a full Transformers checkpoint from History. The desktop workflow creates edits from base checkpoints.
 

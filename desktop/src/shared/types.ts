@@ -23,6 +23,11 @@ export interface EditorProfile {
   endpoint: string
 }
 
+export interface EditorModel {
+  id: string
+  label: string
+}
+
 export interface Score {
   accuracy: number
   reached_token_limit: number
@@ -97,6 +102,7 @@ export interface JobEvent {
 export interface DesktopAPI {
   workspace(): Promise<Workspace>
   cachedTargets(): Promise<CachedTarget[]>
+  listEditorModels(connection: Pick<EditorProfile, 'provider' | 'endpoint'>, key?: string): Promise<EditorModel[]>
   saveEditor(profile: EditorProfile, key?: string): Promise<Workspace>
   commit(runId: string, message: string): Promise<Workspace>
   start(job: JobRequest): Promise<boolean>
